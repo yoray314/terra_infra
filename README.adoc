@@ -1,3 +1,24 @@
-= Test monorepo for infra
+= Azure Infrastructure Examples with OpenTofu
 
-== Examples using OpenTofu
+This repository is a progressive, bottom-up collection of Azure infrastructure examples using
+OpenTofu. Each example should be small enough to understand in isolation while demonstrating the
+same engineering practices expected in a shared infrastructure repository.
+
+== Goals
+
+* Explain infrastructure concepts before introducing abstractions.
+* Keep examples reproducible, reviewable, and safe to destroy.
+* Add reusable modules only after an example demonstrates a concrete need for them.
+* Apply consistent Git, documentation, and validation practices from the first change.
+
+== Current Status
+
+The repository foundation is being established before the first deployable example. The first
+planned example will create a single Azure resource group with local state and Azure CLI
+authentication.
+
+== Documentation
+
+Project documentation is written in AsciiDoc.
+
+* link:CONTRIBUTING.adoc[Contribution and commit guidelines]

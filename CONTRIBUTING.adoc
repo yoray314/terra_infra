@@ -1,0 +1,181 @@
+= Contributing
+
+This repository is both a working infrastructure project and a teaching resource. Changes should
+be easy to review, safe to reproduce, and clear to readers who were not involved in writing them.
+
+== Local Setup
+
+Python development tools are pinned in `requirements-dev.txt`. Install them in a local virtual
+environment and install both configured Git hooks:
+
+[source,shell]
+----
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --requirement requirements-dev.txt
+pre-commit install --install-hooks
+----
+
+Run all file checks before opening a pull request:
+
+[source,shell]
+----
+pre-commit run --all-files
+----
+
+The `commit-msg` hook validates each commit message automatically. Hooks are a local convenience,
+not a security boundary; GitHub Actions repeats the checks because local hooks can be skipped.
+
+== Documentation
+
+Write project documentation in AsciiDoc and use the `.adoc` extension. Do not add Markdown project
+documentation. A service-specific file that cannot use AsciiDoc requires an explicit exception in
+the pre-commit configuration.
+
+Keep documentation close to the behavior it describes. Update it in the same change when commands,
+inputs, outputs, prerequisites, or repository policy change.
+
+== Branches
+
+Create changes on a short-lived branch from `master`. Use a descriptive branch name with a change
+type prefix, for example:
+
+* `feat/resource-group`
+* `fix/state-container-name`
+* `docs/commit-guidelines`
+* `chore/tool-versions`
+
+Do not commit directly to `master`. Pull requests are integrated with rebase merges so every commit
+validated on the branch remains an individual commit in the linear `master` history.
+
+== Commit Requirements
+
+Every new commit must follow Conventional Commits 1.0.0:
+
+[source,text]
+----
+<type>[optional scope][!]: <description>
+
+[optional body]
+
+[optional footer]
+----
+
+Use one of these commit types:
+
+[cols="1,3",options="header"]
+|===
+| Type
+| Purpose
+
+| `feat`
+| Add or materially extend infrastructure behavior.
+
+| `fix`
+| Correct infrastructure or repository behavior.
+
+| `docs`
+| Change documentation only.
+
+| `style`
+| Change formatting without changing behavior.
+
+| `refactor`
+| Restructure code without adding behavior or fixing a defect.
+
+| `perf`
+| Improve performance or efficiency.
+
+| `test`
+| Add or correct automated tests.
+
+| `build`
+| Change build or dependency-management behavior.
+
+| `bump`
+| Update version or release metadata through an automated release process.
+
+| `ci`
+| Change continuous-integration behavior.
+
+| `chore`
+| Perform repository maintenance not covered by another type.
+
+| `revert`
+| Revert an earlier commit.
+|===
+
+The scope is optional. When used, keep it short, lower-case, and specific, such as `repo`,
+`resource-group`, `state`, or `network`.
+
+Write the description in lower-case imperative form, without a trailing period. Keep the complete
+header at or below 100 characters.
+
+Good examples:
+
+[source,text]
+----
+docs(repo): add contribution guidelines
+feat(resource-group): add the initial Azure example
+fix(state): correct the storage container name
+ci(repo): validate commit messages
+----
+
+Bad examples:
+
+[source,text]
+----
+updated files
+feature: Added resource group.
+docs: contribution guidelines and network deployment
+----
+
+Use a body when the reason, tradeoff, migration, or operational effect is not obvious from the
+header. Separate the body from the header with a blank line.
+
+Mark a breaking change with `!` and explain it in a `BREAKING CHANGE` footer:
+
+[source,text]
+----
+feat(network)!: replace the address-space input
+
+BREAKING CHANGE: callers must provide address prefixes as a list.
+----
+
+Each commit must be atomic: it should represent one coherent change, include its related
+documentation, and leave the repository in a valid state. Do not mix unrelated refactoring,
+formatting, and behavior changes in one commit.
+
+The initial historical commit predates these rules. Enforcement begins with the repository
+standards baseline and does not require rewriting existing history.
+
+== Infrastructure Safety
+
+Never commit credentials, access tokens, private keys, OpenTofu state, saved plans, or private
+variable files. Treat a `.gitignore` entry as a convenience rather than protection against secret
+exposure.
+
+Use `.tfvars.example` files with non-sensitive placeholder values when an example needs to document
+inputs. Save local plans with the `.tfplan` extension so they remain untracked.
+
+Commit `.terraform.lock.hcl` for every OpenTofu root module. The lock file records provider
+selections and checksums required for reproducible initialization.
+
+Review an OpenTofu plan before applying it. Examples must document cleanup steps and should be safe
+to destroy unless their documentation explicitly states otherwise.
+
+== Pull Requests
+
+Before requesting review:
+
+* Rebase the branch onto the current `master` branch.
+* Confirm every commit follows the commit requirements.
+* Run `pre-commit run --all-files`.
+* Update the relevant AsciiDoc documentation.
+* Describe the purpose, validation performed, and any infrastructure impact.
+
+The protected `master` branch requires pull requests, a linear history, resolved review
+conversations, and passing repository-quality checks. Force pushes and branch deletion are blocked.
+
+Do not use `--no-verify` to avoid fixing a failed check. Continuous integration will run the same
+policy independently.

@@ -1,0 +1,4 @@
+[tool.commitizen]
+name = "cz_conventional_commits"
+allowed_prefixes = []
+message_length_limit = 100

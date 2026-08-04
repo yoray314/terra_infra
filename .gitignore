@@ -1,0 +1,48 @@
+# OpenTofu working directories
+**/.terraform/*
+
+# OpenTofu state and state lock metadata
+*.tfstate
+*.tfstate.*
+
+# Saved OpenTofu plans
+*.tfplan
+
+# Variable files can contain sensitive values; commit example files instead.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+!*.tfvars.json.example
+
+# OpenTofu crash logs and local override files
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local OpenTofu CLI configuration
+.terraformrc
+terraform.rc
+.tofurc
+tofu.rc
+
+# Local credentials and environment values
+.env
+.env.*
+!.env.example
+
+# Python development environment
+.venv/
+__pycache__/
+*.py[cod]
+
+# Editor and operating-system files
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# .terraform.lock.hcl is intentionally not ignored and must be committed.

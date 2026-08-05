@@ -5,6 +5,9 @@ be easy to review, safe to reproduce, and clear to readers who were not involved
 
 == Local Setup
 
+Install the required tools described in
+link:docs/toolchain.adoc[Development Toolchain] before configuring repository hooks.
+
 Python development tools are pinned in `requirements-dev.txt`. Install them in a local virtual
 environment and install both configured Git hooks:
 

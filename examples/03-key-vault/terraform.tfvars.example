@@ -1,0 +1,15 @@
+resource_group_name = "rg-opentofu-key-vault"
+key_vault_name      = "kv-tofu-replace-1234"
+location            = "westeurope"
+
+# Replace this documentation address with the workstation's public egress address.
+allowed_ipv4_cidrs = [
+  "203.0.113.10/32",
+]
+
+tags = {
+  environment  = "learning"
+  example      = "03-key-vault"
+  "managed-by" = "opentofu"
+  state         = "azure-blob"
+}

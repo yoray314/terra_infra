@@ -1,0 +1,3 @@
+storage_account_name = "sttofustate123456"
+container_name       = "tfstate"
+key                  = "03-key-vault/terraform.tfstate"

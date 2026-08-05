@@ -13,8 +13,8 @@ same engineering practices expected in a shared infrastructure repository.
 
 == Current Status
 
-Repository standards and the development toolchain are established. The examples begin with a
-local-state resource group and then introduce an Azure Blob remote-state backend.
+Repository standards and the development toolchain are established. The examples progress from a
+local-state resource group through remote state and managed secret storage.
 
 == Getting Started
 
@@ -26,6 +26,7 @@ local-state resource group and then introduce an Azure Blob remote-state backend
 
 . link:examples/01-resource-group/README.adoc[Create an Azure resource group]
 . link:examples/02-remote-state/README.adoc[Bootstrap and migrate to Azure Blob remote state]
+. link:examples/03-key-vault/README.adoc[Manage secrets and certificates with Azure Key Vault]
 
 == Documentation
 

@@ -1,0 +1,284 @@
+= Example 03: Azure Key Vault
+
+This example creates a disposable Azure Key Vault and uses Azure CLI to exercise secret and
+certificate versioning. It builds on the remote-state backend from
+link:../02-remote-state/README.adoc[Example 02]. OpenTofu owns only the vault infrastructure and
+RBAC; secret values and certificate private keys never enter OpenTofu configuration or state.
+
+The lab creates one resource group, one Key Vault, and two role assignments. Key Vault operations
+have usage-based charges. Destroy and purge the vault after finishing.
+
+== Learning Objectives
+
+* Separate secret-store infrastructure from secret payload management.
+* Use Entra ID and Azure RBAC instead of legacy access policies.
+* Restrict the public data-plane endpoint to the operator's egress address.
+* Create and rotate secret versions without exposing their values.
+* Create non-exportable self-signed certificate versions.
+* Understand why `sensitive` does not mean absent from OpenTofu state.
+* Clean up a soft-deleted disposable vault safely.
+
+== State Boundary
+
+The AzureRM provider offers resources for Key Vault secrets and certificates, but ordinary secret
+and imported certificate arguments are retained in state. This lesson intentionally does not use
+those resources. OpenTofu state contains names, IDs, firewall rules, and role assignments only.
+
+Azure CLI performs data-plane operations after apply. Those objects are deliberately outside
+OpenTofu ownership, so a later `tofu plan` will not report their versions as drift.
+
+== Prerequisites
+
+Keep the Example 02 backend running. The signed-in user needs permission to create the resource
+group, vault, and role assignments, access the state container, and purge a deleted lab vault.
+Subscription `Owner` satisfies the management and purge requirements, but it does not grant blob
+data access. The user also needs `Storage Blob Data Contributor` on the existing state container,
+which the Example 02 bootstrap grants to its caller. Production permissions should be narrower.
+
+Confirm Azure CLI is using a user identity and export provider context:
+
+[source,shell]
+----
+az account show --query "{name:name,id:id,tenantId:tenantId,userType:user.type}" --output table
+test "$(az account show --query user.type --output tsv)" = "user"
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+export CALLER_OBJECT_ID="$(az ad signed-in-user show --query id --output tsv)"
+----
+
+The provider explicitly enables Azure CLI authentication. Remove unintended `ARM_*` service
+principal, OIDC, or managed-identity variables before continuing.
+
+Confirm the Key Vault resource provider is registered:
+
+[source,shell]
+----
+az provider show --namespace Microsoft.KeyVault --query registrationState --output tsv
+----
+
+If necessary, run `az provider register --namespace Microsoft.KeyVault --wait` once at subscription
+scope.
+
+== Configure Remote State
+
+From `examples/03-key-vault`, copy and edit the ignored backend configuration:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+----
+
+Use the storage account and container created by Example 02. Keep the distinct
+`03-key-vault/terraform.tfstate` key so this root never shares state with another lesson.
+
+== Configure Inputs
+
+Create the ignored variable file and determine the workstation's public IPv4 egress address:
+
+[source,shell]
+----
+cp terraform.tfvars.example terraform.tfvars
+curl --fail --silent --show-error --ipv4 https://api.ipify.org
+----
+
+Replace the documentation address in `allowed_ipv4_cidrs` with that address followed by `/32`.
+Choose a globally unique Key Vault name containing 3 to 24 letters, digits, or single hyphens.
+Corporate proxies can use a different egress address than the workstation expects; a
+`ForbiddenByFirewall` response later indicates that this rule needs correction.
+
+== Deploy the Vault
+
+[source,shell]
+----
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu plan -out=key-vault.tfplan
+tofu apply key-vault.tfplan
+----
+
+The plan should report `4 to add`: the resource group, vault, and two data-plane role assignments.
+Capture identifiers and verify that the role recipient matches Azure CLI:
+
+[source,shell]
+----
+export KEY_VAULT_NAME="$(tofu output -raw key_vault_name)"
+export KEY_VAULT_LOCATION="$(tofu output -raw key_vault_location)"
+export RESOURCE_GROUP_NAME="$(tofu output -raw resource_group_name)"
+test "${CALLER_OBJECT_ID}" = "$(tofu output -raw caller_object_id)"
+----
+
+RBAC can take several minutes to propagate. Retry these metadata-only listings until both succeed:
+
+[source,shell]
+----
+az keyvault secret list --vault-name "${KEY_VAULT_NAME}" --query "[].id" --output tsv
+az keyvault certificate list --vault-name "${KEY_VAULT_NAME}" --query "[].id" --output tsv
+----
+
+== Rotate a Secret
+
+Use a hidden prompt and process substitution so the values are not command arguments or regular
+files. Run these commands in Bash with tracing disabled:
+
+[source,shell]
+----
+set +x
+export SECRET_NAME="demo-api-token"
+
+IFS= read -r -s -p "First secret value: " SECRET_VALUE
+printf '\n'
+FIRST_SECRET_ID="$(az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${SECRET_NAME}" \
+  --file <(printf '%s' "${SECRET_VALUE}") \
+  --encoding utf-8 \
+  --content-type "opaque lab token" \
+  --query id \
+  --output tsv)"
+unset SECRET_VALUE
+
+IFS= read -r -s -p "Rotated secret value: " SECRET_VALUE
+printf '\n'
+SECOND_SECRET_ID="$(az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${SECRET_NAME}" \
+  --file <(printf '%s' "${SECRET_VALUE}") \
+  --encoding utf-8 \
+  --content-type "opaque lab token" \
+  --query id \
+  --output tsv)"
+unset SECRET_VALUE
+----
+
+List metadata only, then disable the old version:
+
+[source,shell]
+----
+az keyvault secret list-versions \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${SECRET_NAME}" \
+  --query "[].{id:id,enabled:attributes.enabled,created:attributes.created}" \
+  --output table
+
+az keyvault secret set-attributes \
+  --id "${FIRST_SECRET_ID}" \
+  --enabled false \
+  --query "{id:id,enabled:attributes.enabled}" \
+  --output json
+
+test "${FIRST_SECRET_ID}" != "${SECOND_SECRET_ID}"
+----
+
+Key Vault creates opaque versions under one name. Individual old versions can be disabled, but
+deleting a named secret acts on the whole versioned object.
+
+== Rotate a Certificate
+
+The tracked policy creates an RSA self-signed certificate whose private key is non-exportable and
+not reused between versions:
+
+[source,shell]
+----
+export CERTIFICATE_NAME="lab-self-signed"
+
+az keyvault certificate create \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${CERTIFICATE_NAME}" \
+  --policy @certificate-policy.json \
+  --output none
+
+FIRST_CERTIFICATE_ID="$(az keyvault certificate show \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${CERTIFICATE_NAME}" \
+  --query id \
+  --output tsv)"
+
+az keyvault certificate create \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${CERTIFICATE_NAME}" \
+  --policy @certificate-policy.json \
+  --output none
+
+SECOND_CERTIFICATE_ID="$(az keyvault certificate show \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${CERTIFICATE_NAME}" \
+  --query id \
+  --output tsv)"
+----
+
+Inspect version metadata and disable the first version:
+
+[source,shell]
+----
+az keyvault certificate list-versions \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${CERTIFICATE_NAME}" \
+  --query "[].{id:id,thumbprint:x509ThumbprintHex,enabled:attributes.enabled,expires:attributes.expires}" \
+  --output table
+
+az keyvault certificate set-attributes \
+  --id "${FIRST_CERTIFICATE_ID}" \
+  --enabled false \
+  --query "{id:id,enabled:attributes.enabled}" \
+  --output json
+
+test "${FIRST_CERTIFICATE_ID}" != "${SECOND_CERTIFICATE_ID}"
+----
+
+This is immediate manual version rotation. Scheduled issuer renewal uses longer certificate
+lifetimes and is not practical to wait for in a short lab.
+
+== Confirm the State Boundary
+
+[source,shell]
+----
+tofu state list
+tofu plan -lock-timeout=1m
+----
+
+The state contains four infrastructure resources and no secret or certificate-version resources.
+The plan should report no changes after all data-plane operations.
+
+== Destroy and Purge
+
+The provider is configured to purge this disposable vault after soft deletion. Production vaults
+normally enable purge protection instead; once enabled, it cannot be bypassed during retention.
+
+[source,shell]
+----
+tofu plan -destroy -out=key-vault-destroy.tfplan
+tofu apply key-vault-destroy.tfplan
+
+az group exists --name "${RESOURCE_GROUP_NAME}"
+az keyvault list-deleted \
+  --resource-type vault \
+  --subscription "${ARM_SUBSCRIPTION_ID}" \
+  --query "[?name=='${KEY_VAULT_NAME}'].name" \
+  --output tsv
+----
+
+The group check must print `false`, and the deleted-vault query must be empty. If destroy fails while
+purging, grant the operator the required purge permission, purge the deleted vault, and regenerate
+the destroy plan so OpenTofu can reconcile its state and remove the resource group:
+
+[source,shell]
+----
+az keyvault purge \
+  --name "${KEY_VAULT_NAME}" \
+  --location "${KEY_VAULT_LOCATION}" \
+  --subscription "${ARM_SUBSCRIPTION_ID}"
+
+tofu plan -destroy -out=key-vault-destroy-retry.tfplan
+tofu apply key-vault-destroy-retry.tfplan
+----
+
+Do not reuse a failed saved plan. Keep the Example 02 backend until all later roots using it have
+been destroyed.
+
+== Further Reading
+
+* https://learn.microsoft.com/azure/key-vault/general/rbac-guide[Azure Key Vault RBAC]
+* https://learn.microsoft.com/azure/key-vault/general/soft-delete-overview[Key Vault soft delete]
+* https://learn.microsoft.com/cli/azure/keyvault/secret[Azure CLI secret commands]
+* https://learn.microsoft.com/cli/azure/keyvault/certificate[Azure CLI certificate commands]

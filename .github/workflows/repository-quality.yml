@@ -70,6 +70,14 @@ jobs:
         working-directory: examples/02-remote-state/workload
         run: tofu validate -no-color
 
+      - name: Initialize Key Vault example
+        working-directory: examples/03-key-vault
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate Key Vault example
+        working-directory: examples/03-key-vault
+        run: tofu validate -no-color
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

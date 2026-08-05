@@ -1,0 +1,22 @@
+{
+  "issuer_parameters": {
+    "name": "Self"
+  },
+  "key_properties": {
+    "exportable": false,
+    "key_size": 2048,
+    "key_type": "RSA",
+    "reuse_key": false
+  },
+  "secret_properties": {
+    "content_type": "application/x-pkcs12"
+  },
+  "x509_certificate_properties": {
+    "key_usage": [
+      "digitalSignature",
+      "keyEncipherment"
+    ],
+    "subject": "CN=opentofu-key-vault-lab.invalid",
+    "validity_in_months": 3
+  }
+}

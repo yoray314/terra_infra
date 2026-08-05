@@ -13,15 +13,18 @@ same engineering practices expected in a shared infrastructure repository.
 
 == Current Status
 
-Repository standards and the development toolchain are established before the first deployable
-example. The first planned example will create a single Azure resource group with local state and
-Azure CLI authentication.
+Repository standards and the development toolchain are established. The first deployable example
+creates a single Azure resource group with local state and Azure CLI authentication.
 
 == Getting Started
 
 . Install and verify the tools in link:docs/toolchain.adoc[Development Toolchain].
 . Follow link:CONTRIBUTING.adoc[Contribution and commit guidelines] to enable local checks.
 . Confirm the intended Azure account and subscription before running an example.
+
+== Examples
+
+. link:examples/01-resource-group/README.adoc[Create an Azure resource group]
 
 == Documentation
 

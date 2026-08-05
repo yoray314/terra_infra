@@ -1,0 +1,9 @@
+resource_group_name = "rg-opentofu-remote-state"
+location            = "westeurope"
+
+tags = {
+  environment  = "learning"
+  example      = "02-remote-state"
+  "managed-by" = "opentofu"
+  state         = "azure-blob"
+}

@@ -52,6 +52,24 @@ jobs:
         working-directory: examples/01-resource-group
         run: tofu validate -no-color
 
+      - name: Initialize remote-state bootstrap
+        working-directory: examples/02-remote-state/bootstrap
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate remote-state bootstrap
+        working-directory: examples/02-remote-state/bootstrap
+        run: tofu validate -no-color
+
+      - name: Initialize remote-state workload
+        working-directory: examples/02-remote-state/workload
+        run: |
+          cp backend-template/backend.tf backend.tf
+          tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate remote-state workload
+        working-directory: examples/02-remote-state/workload
+        run: tofu validate -no-color
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

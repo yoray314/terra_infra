@@ -44,6 +44,14 @@ jobs:
       - name: Run repository checks
         run: pre-commit run --all-files --show-diff-on-failure
 
+      - name: Initialize resource-group example
+        working-directory: examples/01-resource-group
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate resource-group example
+        working-directory: examples/01-resource-group
+        run: tofu validate -no-color
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

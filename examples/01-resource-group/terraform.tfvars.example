@@ -1,0 +1,8 @@
+resource_group_name = "rg-opentofu-learning-001"
+location            = "westeurope"
+
+tags = {
+  environment  = "learning"
+  example      = "01-resource-group"
+  "managed-by" = "opentofu"
+}

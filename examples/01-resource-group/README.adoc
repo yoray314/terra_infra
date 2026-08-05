@@ -1,0 +1,177 @@
+= Example 01: Azure Resource Group
+
+This example creates one Azure resource group. It is intentionally small so the complete OpenTofu
+workflow can be learned before introducing remote state, modules, networking, or CI credentials.
+
+An empty resource group has no direct Azure charge. Resources added to it later may incur costs.
+
+== Learning Objectives
+
+After completing this example, you should understand:
+
+* How an OpenTofu root module is organized.
+* How required OpenTofu and provider versions are declared.
+* How Azure CLI credentials are used by the AzureRM provider.
+* How variables, resources, and outputs connect to one another.
+* How to initialize, format, validate, plan, apply, inspect, and destroy infrastructure.
+* Why local state is suitable for this first lesson but not for shared infrastructure.
+
+== Prerequisites
+
+Complete the repository link:../../docs/toolchain.adoc[Development Toolchain] setup. You need:
+
+* OpenTofu `1.12.5`.
+* Azure CLI `2.88.0` or newer.
+* An authenticated Azure user with permission to manage resource groups in a disposable
+  subscription.
+
+== Files
+
+[cols="2,4",options="header"]
+|===
+| File
+| Purpose
+
+| `versions.tf`
+| Constrains OpenTofu and declares the AzureRM provider.
+
+| `providers.tf`
+| Configures Azure CLI authentication behavior and resource-group deletion safety.
+
+| `variables.tf`
+| Defines configurable inputs and validates basic constraints.
+
+| `main.tf`
+| Declares the Azure resource group.
+
+| `outputs.tf`
+| Exposes useful resource-group attributes after apply.
+
+| `terraform.tfvars.example`
+| Provides non-sensitive example input values.
+
+| `.terraform.lock.hcl`
+| Locks the selected provider version and package checksums.
+|===
+
+== Confirm the Azure Subscription
+
+Sign in if necessary, inspect the active subscription, and expose its ID to the provider:
+
+[source,shell]
+----
+az login
+az account show --query "{name:name, id:id, tenantId:tenantId}" --output table
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+----
+
+If the displayed subscription is not the disposable subscription, select the correct one before
+continuing:
+
+[source,shell]
+----
+az account set --subscription "<subscription ID or name>"
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+----
+
+== Configure Inputs
+
+Move into this example and create an ignored local variable file from the non-sensitive template:
+
+[source,shell]
+----
+cd examples/01-resource-group
+cp terraform.tfvars.example terraform.tfvars
+----
+
+Review `terraform.tfvars` and choose a resource-group name that does not already exist in the active
+subscription. Variable files are ignored because later examples may contain sensitive values;
+`.tfvars.example` files are safe documentation and remain tracked.
+
+== Initialize
+
+Initialize the root module:
+
+[source,shell]
+----
+tofu init
+----
+
+Initialization downloads the locked AzureRM provider into the ignored `.terraform` directory. The
+committed `.terraform.lock.hcl` ensures collaborators and CI select the same provider release.
+
+== Format and Validate
+
+Check canonical formatting and validate the configuration without creating resources:
+
+[source,shell]
+----
+tofu fmt -check
+tofu validate
+----
+
+== Plan
+
+Create and review a saved execution plan:
+
+[source,shell]
+----
+tofu plan -out=resource-group.tfplan
+----
+
+The plan should report `1 to add, 0 to change, 0 to destroy`. Saved `.tfplan` files are ignored and
+must never be committed because they can contain sensitive values.
+
+== Apply
+
+Apply exactly the reviewed plan:
+
+[source,shell]
+----
+tofu apply resource-group.tfplan
+----
+
+Inspect the OpenTofu outputs and the live Azure resource:
+
+[source,shell]
+----
+tofu output
+az group show \
+  --name "$(tofu output -raw resource_group_name)" \
+  --query "{name:name, location:location, tags:tags}" \
+  --output json
+----
+
+== Make a Change
+
+Change a tag in `terraform.tfvars`, run `tofu plan`, and inspect the in-place update. Revert the
+change or apply it before continuing. This demonstrates how configuration, state, and the remote
+object are compared to produce a plan.
+
+== Destroy
+
+Capture the output needed for verification, create a destruction plan, and apply it:
+
+[source,shell]
+----
+RESOURCE_GROUP_NAME="$(tofu output -raw resource_group_name)"
+tofu plan -destroy -out=destroy.tfplan
+tofu apply destroy.tfplan
+az group exists --name "${RESOURCE_GROUP_NAME}"
+----
+
+The final command must print `false`.
+
+The provider is configured to refuse resource-group deletion when Azure resources exist inside the
+group but are not represented in this OpenTofu state. If that safety check triggers, manage or
+remove those resources explicitly rather than bypassing the check.
+
+== State in This Lesson
+
+OpenTofu stores state locally in `terraform.tfstate` for this example. The state file is ignored by
+Git and must never be committed. Local state is deliberately used here to expose the basic workflow
+without introducing backend bootstrapping at the same time.
+
+Local state is not suitable for collaboration: it has no shared locking, centralized access
+control, or durable team backup. A later example will bootstrap Azure Storage and migrate normal
+root modules to remote state.

@@ -8,6 +8,10 @@
 # Saved OpenTofu plans
 *.tfplan
 
+# Local backend activation and partial configuration
+*.tfbackend
+/examples/02-remote-state/workload/backend.tf
+
 # Variable files can contain sensitive values; commit example files instead.
 *.tfvars
 *.tfvars.json

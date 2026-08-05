@@ -1,0 +1,373 @@
+= Example 02: Azure Blob Remote State
+
+This example bootstraps an Azure Blob Storage backend and migrates a small workload from local
+state into that backend. It builds on the lifecycle introduced in
+link:../01-resource-group/README.adoc[Example 01] while keeping backend creation separate from the
+infrastructure whose state it stores.
+
+The exercise creates two resource groups, one storage account, one private blob container, and one
+role assignment. Azure Storage has usage-based charges even when it stores only a small state file.
+Destroy the exercise when it is no longer needed.
+
+== Learning Objectives
+
+After completing this example, you should understand:
+
+* Why collaborative infrastructure needs remote state.
+* Why a remote-state backend must exist before a workload can use it.
+* Why backend authentication is separate from provider authentication.
+* How Entra ID and Azure RBAC replace storage account keys.
+* How to migrate existing state without recreating Azure resources.
+* How Azure Blob leases prevent concurrent state writers.
+* How blob versioning and soft deletion help recover state.
+* Why workloads must be destroyed before their backend.
+
+== Architecture
+
+[source,text]
+----
+bootstrap root (local state)
+  |
+  +--> backend resource group
+         +--> storage account
+                +--> private state container
+                       +--> Storage Blob Data Contributor assignment
+                       +--> workload state blob and lease
+                                      ^
+                                      |
+workload root (local state, then migrated to Azure Blob)
+----
+
+The `bootstrap` root deliberately retains local state for this disposable lesson. A backend cannot
+create the storage account that it needs before initialization. Keeping bootstrap state separate
+also allows the remotely tracked workload to be destroyed before the storage account is removed.
+
+The storage public network endpoint remains enabled so a developer workstation can reach it. The
+container does not permit anonymous access, Shared Key authorization is disabled, and all state
+operations use the signed-in Entra identity. A later networking lesson can replace public endpoint
+access with a private endpoint and private DNS.
+
+== Security Boundaries
+
+State files can contain resource attributes, credentials returned by providers, generated values,
+and values marked `sensitive`. Remote state protects access to the file; it does not remove secrets
+from the file. Treat both the local bootstrap state and the remote workload state as sensitive.
+
+This example applies the following controls:
+
+* Shared Key and local-user authorization are disabled.
+* HTTPS and TLS 1.2 are required.
+* Nested items cannot opt into public access.
+* The state container is private.
+* The current OpenTofu caller receives `Storage Blob Data Contributor` only on the container.
+* Blob versioning and seven-day blob and container soft deletion are enabled.
+* Credentials come from Azure CLI rather than backend files or command-line secrets.
+
+The storage account uses service-managed encryption at rest. Customer-managed keys are deferred
+until the Key Vault lesson so this example can focus on state behavior.
+
+== Prerequisites
+
+Complete link:../01-resource-group/README.adoc[Example 01] and the repository
+link:../../docs/toolchain.adoc[Development Toolchain] setup. The signed-in identity needs permission
+to create resource groups and storage accounts and to create role assignments. The `Owner` role, or
+the `User Access Administrator` role plus the required resource-management permissions, satisfies
+the role-assignment requirement.
+
+Confirm the intended subscription and export its ID for the AzureRM provider:
+
+[source,shell]
+----
+az login
+az account show --query "{name:name, id:id, tenantId:tenantId}" --output table
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+----
+
+The lesson explicitly enables Azure CLI authentication. Other `ARM_*` authentication variables in
+the shell can still select a service principal, workload identity, or managed identity instead. Use
+a clean shell environment unless that different identity is intentional.
+
+The provider does not register resource providers automatically. Confirm that Azure Storage is
+registered:
+
+[source,shell]
+----
+az provider show \
+  --namespace Microsoft.Storage \
+  --query registrationState \
+  --output tsv
+----
+
+If the result is not `Registered`, register it once at subscription scope:
+
+[source,shell]
+----
+az provider register --namespace Microsoft.Storage --wait
+----
+
+== Files
+
+[cols="2,4",options="header"]
+|===
+| Path
+| Purpose
+
+| `bootstrap/`
+| Root module that creates the backend while retaining local bootstrap state.
+
+| `bootstrap/terraform.tfvars.example`
+| Example names, location, and tags for the backend resources.
+
+| `workload/`
+| Root module that creates a resource group before and after state migration.
+
+| `workload/backend-template/backend.tf`
+| Partial `azurerm` backend declaration activated during migration.
+
+| `workload/backend.azurerm.tfbackend.example`
+| Example non-sensitive backend location values.
+
+| `workload/terraform.tfvars.example`
+| Example workload inputs.
+|===
+
+Both root modules have their own dependency lock file because OpenTofu selects providers per root
+module.
+
+== Configure Inputs
+
+From `examples/02-remote-state`, create ignored local variable files:
+
+[source,shell]
+----
+cp bootstrap/terraform.tfvars.example bootstrap/terraform.tfvars
+cp workload/terraform.tfvars.example workload/terraform.tfvars
+----
+
+Edit `bootstrap/terraform.tfvars` and replace the numeric suffix in `storage_account_name`. Azure
+Storage account names contain only lowercase letters and digits, are at most 24 characters, and are
+globally unique across Azure. Also confirm that both resource-group names are disposable and do not
+already exist.
+
+== Bootstrap the Backend
+
+Initialize, validate, plan, and apply the bootstrap root:
+
+[source,shell]
+----
+tofu -chdir=bootstrap init
+tofu -chdir=bootstrap fmt -check
+tofu -chdir=bootstrap validate
+tofu -chdir=bootstrap plan -out=bootstrap.tfplan
+tofu -chdir=bootstrap apply bootstrap.tfplan
+----
+
+The plan should report `4 to add, 0 to change, 0 to destroy`: a resource group, storage account,
+container, and role assignment.
+
+Capture the backend identifiers from outputs:
+
+[source,shell]
+----
+export STATE_STORAGE_ACCOUNT="$(tofu -chdir=bootstrap output -raw storage_account_name)"
+export STATE_CONTAINER="$(tofu -chdir=bootstrap output -raw container_name)"
+export STATE_KEY="$(tofu -chdir=bootstrap output -raw state_key)"
+----
+
+Confirm that the identity granted container access is the same user authenticated by Azure CLI:
+
+[source,shell]
+----
+az ad signed-in-user show --query id --output tsv
+tofu -chdir=bootstrap output -raw backend_principal_object_id
+----
+
+The two object IDs must match for the documented Azure CLI storage and backend commands. If they do
+not, remove unintended `ARM_*` credential variables, reinitialize, and recreate the bootstrap with
+the intended identity.
+
+Azure RBAC assignments can take several minutes to propagate. Confirm Entra data-plane access; if
+the command reports `AuthorizationPermissionMismatch`, wait and retry:
+
+[source,shell]
+----
+az storage blob list \
+  --account-name "${STATE_STORAGE_ACCOUNT}" \
+  --container-name "${STATE_CONTAINER}" \
+  --auth-mode login \
+  --output table
+----
+
+An empty result is successful because no state blob exists yet.
+
+== Create Local Workload State
+
+Initialize and apply the workload before enabling its remote backend:
+
+[source,shell]
+----
+tofu -chdir=workload init
+tofu -chdir=workload fmt -check
+tofu -chdir=workload validate
+tofu -chdir=workload plan -out=workload.tfplan
+tofu -chdir=workload apply workload.tfplan
+tofu -chdir=workload state list
+----
+
+The state list should contain `azurerm_resource_group.workload`, and the state currently resides in
+`workload/terraform.tfstate`. Back up that file before changing backends:
+
+[source,shell]
+----
+cp workload/terraform.tfstate workload/terraform.tfstate.pre-migration-backup
+----
+
+The backup is ignored by Git but remains sensitive. Keep it only as long as recovery requires.
+
+== Configure the Remote Backend
+
+Activate the partial backend declaration and generate its non-sensitive location configuration
+from bootstrap outputs:
+
+[source,shell]
+----
+cp workload/backend-template/backend.tf workload/backend.tf
+tofu -chdir=bootstrap output -raw backend_config > workload/backend.azurerm.tfbackend
+----
+
+`workload/backend.tf` selects Entra ID and Azure CLI authentication. The generated `.tfbackend`
+file contains only the storage account, container, and blob names. Both generated files are ignored
+because they are local configuration for this exercise.
+
+Never put access keys, SAS tokens, client secrets, or other credentials in a backend block or pass
+them with `-backend-config`. OpenTofu records the merged backend configuration in `.terraform` and
+inside saved plan files. Azure CLI supplies the credential without writing it into configuration.
+
+== Migrate the State
+
+Reinitialize the workload and request state migration:
+
+[source,shell]
+----
+tofu -chdir=workload init \
+  -migrate-state \
+  -backend-config=backend.azurerm.tfbackend
+----
+
+Review the source and destination described by OpenTofu, then answer `yes` when asked to copy the
+existing state. This moves state management without changing the Azure resource.
+
+Verify that OpenTofu still tracks the resource and that the state blob exists:
+
+[source,shell]
+----
+tofu -chdir=workload state list
+tofu -chdir=workload plan -lock-timeout=1m
+az storage blob show \
+  --account-name "${STATE_STORAGE_ACCOUNT}" \
+  --container-name "${STATE_CONTAINER}" \
+  --name "${STATE_KEY}" \
+  --auth-mode login \
+  --query "{name:name, size:properties.contentLength, leaseStatus:properties.lease.status}" \
+  --output json
+----
+
+The plan should report no changes. Do not download or print the state blob as part of routine
+verification.
+
+== Observe State Locking
+
+The `azurerm` backend acquires an Azure Blob lease before writing state. It does not require a lock
+table or a second Azure resource. To make lock contention observable, acquire a 60-second lease
+outside OpenTofu:
+
+[source,shell]
+----
+LEASE_ID="$(az storage blob lease acquire \
+  --account-name "${STATE_STORAGE_ACCOUNT}" \
+  --container-name "${STATE_CONTAINER}" \
+  --blob-name "${STATE_KEY}" \
+  --auth-mode login \
+  --lease-duration 60 \
+  --output tsv)"
+
+tofu -chdir=workload plan -lock-timeout=5s
+----
+
+The plan is expected to fail with an error acquiring the state lock. Release the test lease and
+confirm planning works again:
+
+[source,shell]
+----
+az storage blob lease release \
+  --account-name "${STATE_STORAGE_ACCOUNT}" \
+  --container-name "${STATE_CONTAINER}" \
+  --blob-name "${STATE_KEY}" \
+  --auth-mode login \
+  --lease-id "${LEASE_ID}"
+
+tofu -chdir=workload plan -lock-timeout=1m
+----
+
+The finite lease expires automatically if the release command is missed. For a real OpenTofu lock,
+first verify that no operation is running before considering `tofu force-unlock`.
+
+== Recovery Controls
+
+Each successful state write creates a previous blob version. Soft deletion retains deleted blobs
+and containers for seven days. These controls help recover from accidental state overwrites or blob
+deletion, but they do not protect against deletion of the entire storage account. Production
+backends commonly add stricter RBAC, resource locks, monitoring, lifecycle policies, and private
+network access.
+
+State locking prevents concurrent writers; it does not provide access control or backup. Versioning
+and soft deletion provide recovery; they do not prevent concurrent writes. Both controls are
+required for different failure modes.
+
+== Destroy in Dependency Order
+
+The workload depends operationally on the backend even though the two root modules have no
+OpenTofu dependency edge. Destroy the remotely tracked workload first:
+
+[source,shell]
+----
+export WORKLOAD_RESOURCE_GROUP="$(tofu -chdir=workload output -raw resource_group_name)"
+export BACKEND_RESOURCE_GROUP="$(tofu -chdir=bootstrap output -raw resource_group_name)"
+tofu -chdir=workload plan -destroy -out=workload-destroy.tfplan
+tofu -chdir=workload apply workload-destroy.tfplan
+tofu -chdir=workload state list
+----
+
+The final state list should be empty. Remove the generated backend declaration and migrate the empty
+state back to the default local backend before deleting Azure Storage:
+
+[source,shell]
+----
+rm workload/backend.tf
+tofu -chdir=workload init -migrate-state
+----
+
+When the remote state is empty, OpenTofu can unset the backend without displaying a copy
+confirmation. If it does prompt, review the source and destination before answering `yes`. After the
+backend is successfully unset, destroy the bootstrap root from its independent local state:
+
+[source,shell]
+----
+tofu -chdir=bootstrap plan -destroy -out=bootstrap-destroy.tfplan
+tofu -chdir=bootstrap apply bootstrap-destroy.tfplan
+az group exists --name "${WORKLOAD_RESOURCE_GROUP}"
+az group exists --name "${BACKEND_RESOURCE_GROUP}"
+----
+
+Both checks must print `false`.
+
+After verifying Azure cleanup, remove generated backend configuration and state backups according
+to your local data-retention policy. An ignored file is protected from Git, not from other users or
+processes on the workstation.
+
+== Further Reading
+
+* https://opentofu.org/docs/v1.12/language/settings/backends/azurerm/[OpenTofu `azurerm` backend]
+* https://opentofu.org/docs/v1.12/language/settings/backends/configuration/[OpenTofu backend configuration and migration]
+* https://learn.microsoft.com/azure/storage/blobs/assign-azure-role-data-access[Azure Blob data-access roles]
+* https://learn.microsoft.com/azure/storage/blobs/versioning-overview[Azure Blob versioning]

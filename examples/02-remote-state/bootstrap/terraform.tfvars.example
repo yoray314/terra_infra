@@ -1,0 +1,9 @@
+resource_group_name  = "rg-opentofu-state"
+storage_account_name = "sttofustate123456"
+location             = "westeurope"
+
+tags = {
+  environment  = "learning"
+  example      = "02-remote-state"
+  "managed-by" = "opentofu"
+}

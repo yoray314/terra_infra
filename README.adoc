@@ -13,8 +13,8 @@ same engineering practices expected in a shared infrastructure repository.
 
 == Current Status
 
-Repository standards and the development toolchain are established. The first deployable example
-creates a single Azure resource group with local state and Azure CLI authentication.
+Repository standards and the development toolchain are established. The examples begin with a
+local-state resource group and then introduce an Azure Blob remote-state backend.
 
 == Getting Started
 
@@ -25,6 +25,7 @@ creates a single Azure resource group with local state and Azure CLI authenticat
 == Examples
 
 . link:examples/01-resource-group/README.adoc[Create an Azure resource group]
+. link:examples/02-remote-state/README.adoc[Bootstrap and migrate to Azure Blob remote state]
 
 == Documentation
 

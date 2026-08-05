@@ -1,0 +1,138 @@
+= Development Toolchain
+
+This repository uses a small, explicit toolchain. OpenTofu is pinned exactly because its version
+can affect configuration evaluation, state, and generated plans. Supporting tools use documented
+minimum versions when an exact version does not affect infrastructure semantics.
+
+== Supported Versions
+
+[cols="2,2,1,4",options="header"]
+|===
+| Tool
+| Version
+| Policy
+| Source of truth
+
+| OpenTofu
+| `1.12.5`
+| Exact
+| link:../.opentofu-version[.opentofu-version]
+
+| Azure CLI
+| `2.88.0` or newer
+| Minimum
+| This document; CI does not require Azure CLI user authentication.
+
+| Python
+| `3.11` or newer; CI uses `3.13`
+| Minimum
+| `requirements-dev.txt` and `.github/workflows/repository-quality.yml`
+
+| pre-commit
+| `4.6.1`
+| Exact
+| `requirements-dev.txt`
+
+| Commitizen
+| `4.17.0`
+| Exact
+| `requirements-dev.txt`
+|===
+
+Azure CLI is an authentication and account-selection helper for local examples. It is not pinned
+to an exact patch release because availability differs across operating-system package repositories.
+CI authentication will eventually use OpenID Connect rather than Azure CLI user credentials.
+
+== Install OpenTofu
+
+Install the version recorded in `.opentofu-version` by following the
+https://opentofu.org/docs/intro/install/[official OpenTofu installation guide]. Do not install an
+unqualified `latest` version for work in this repository.
+
+The optional https://github.com/tofuutils/tenv[tenv version manager] reads
+`.opentofu-version` directly. From the repository root:
+
+[source,shell]
+----
+tenv tofu install
+tofu version
+----
+
+The version output must begin with:
+
+[source,text]
+----
+OpenTofu v1.12.5
+----
+
+GitHub Actions reads the same version file, so local and continuous-integration formatting and
+validation use the same OpenTofu release.
+
+== Install Azure CLI
+
+Install Azure CLI by following the
+https://learn.microsoft.com/en-us/cli/azure/install-azure-cli[official Azure CLI installation
+guide] for the local operating system. Distribution package repositories may lag the latest Azure
+CLI release, but the installed version must be at least `2.88.0`.
+
+Verify the installation:
+
+[source,shell]
+----
+az version
+----
+
+== Authenticate to Azure
+
+The learning examples use an interactive Azure CLI session. Sign in with a user identity and
+multifactor authentication:
+
+[source,shell]
+----
+az login
+az account show --output table
+----
+
+If the identity has access to multiple subscriptions, explicitly select the subscription that may
+contain disposable learning resources:
+
+[source,shell]
+----
+az account set --subscription "<subscription ID or name>"
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+----
+
+Run `az account show --output table` again before every apply when switching between Azure accounts
+or subscriptions. A subscription ID is not a secret, but access tokens and service-principal
+credentials are secrets and must never be stored in this repository or in `.tfvars` files.
+
+Interactive user authentication is for local learning only. Automated workflows will use a
+short-lived workload identity through GitHub Actions OpenID Connect rather than stored client
+secrets.
+
+== Install Repository Tools
+
+After installing OpenTofu and Python, follow
+link:../CONTRIBUTING.adoc#_local_setup[Local Setup] to create `.venv`, install the pinned Python
+development tools, and enable the Git hooks.
+
+With the virtual environment active, verify the complete local toolchain:
+
+[source,shell]
+----
+tofu version
+az version
+python --version
+pre-commit --version
+cz version
+----
+
+== Version Upgrades
+
+Upgrade OpenTofu in a dedicated pull request. Update `.opentofu-version`, confirm every root
+module's `required_version` constraint remains compatible, run repository checks, and review plans
+for existing examples before merging.
+
+Update Azure CLI's minimum version only when examples require a newer capability or the existing
+minimum is no longer supported. Update pinned Python tools in `requirements-dev.txt` together with
+their corresponding pre-commit configuration.

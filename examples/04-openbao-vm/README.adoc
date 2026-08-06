@@ -1,0 +1,305 @@
+= Example 04: OpenBao on an Azure VM
+
+This example deploys a disposable, single-node OpenBao lab on Azure. OpenTofu creates the network,
+VM, disks, and non-secret bootstrap configuration. OpenBao initialization, unseal keys, root token,
+runtime secrets, and issued private keys remain outside OpenTofu and Git.
+
+This is intentionally not a production architecture. It has one node, no Raft quorum failure
+tolerance, no automatic unseal, no durable certificate-renewal path, and a public endpoint
+restricted to one operator IP. The VM and managed disks incur charges while deployed.
+
+== Learning Objectives
+
+* Provision a self-hosted secret service without placing bootstrap secrets in state.
+* Use a dedicated managed disk for integrated Raft storage.
+* Generate listener keys only on the VM.
+* Initialize and manually unseal OpenBao outside OpenTofu.
+* Exercise KV v2 versioning and short-lived PKI issuance.
+* Understand the operational work hidden by a managed service such as Key Vault.
+
+== Architecture
+
+[source,text]
+----
+operator /32
+  |
+  +--> TCP 22 and 8200
+         |
+     public IP and NSG
+         |
+     Ubuntu VM
+       +--> OpenBao 2.6.1
+       +--> VM-generated TLS key
+       +--> manual Shamir unseal
+       +--> dedicated Standard SSD with Raft data
+----
+
+The listener certificate is signed by a lab CA generated in VM memory during bootstrap. The CA
+private key is deleted after signing, so the 90-day listener certificate cannot be renewed. This is
+a deliberate lab limitation, not a certificate-management recommendation.
+
+== Prerequisites
+
+* Complete Examples 02 and 03 and keep the remote-state backend available.
+* Install the `bao`, `gpg`, `jq`, `openssl`, `ssh`, and Azure CLI clients locally.
+* Create an SSH key outside this repository if one does not already exist.
+* Use a subscription with quota for the selected VM size and permission to create the resources.
+
+Confirm the Compute and Network resource providers are registered:
+
+[source,shell]
+----
+az provider show --namespace Microsoft.Compute --query registrationState --output tsv
+az provider show --namespace Microsoft.Network --query registrationState --output tsv
+----
+
+Register either provider with `az provider register --namespace <namespace> --wait` if needed.
+
+The pinned Ubuntu image was verified in `eastus`. Confirm it remains available:
+
+[source,shell]
+----
+az vm image show \
+  --location eastus \
+  --urn Canonical:ubuntu-24_04-lts:server:24.04.202608020 \
+  --output table
+
+az vm list-skus \
+  --location eastus \
+  --resource-type virtualMachines \
+  --size Standard_B2s_v2 \
+  --all \
+  --output table
+----
+
+== Configure State and Inputs
+
+From `examples/04-openbao-vm`, create ignored configuration files:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+cp terraform.tfvars.example terraform.tfvars
+----
+
+Set the backend account and container from Example 02. Preserve the distinct
+`04-openbao-vm/terraform.tfstate` key.
+
+Replace `caller_ipv4_cidr` with the workstation's public egress address followed by `/32`, and
+choose a regionally unique lowercase `dns_label`. Confirm that `ssh_public_key_path` points to a
+public key, never a private key.
+
+Export provider context:
+
+[source,shell]
+----
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+----
+
+== Plan and Deploy
+
+[source,shell]
+----
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu plan -out=openbao-vm.tfplan
+tofu apply openbao-vm.tfplan
+----
+
+Review the VM size, public IP, two managed disks, and network rules before applying. Capture the
+non-sensitive outputs:
+
+[source,shell]
+----
+export OPENBAO_FQDN="$(tofu output -raw openbao_fqdn)"
+export BAO_ADDR="$(tofu output -raw openbao_url)"
+export RESOURCE_GROUP_NAME="$(tofu output -raw resource_group_name)"
+export SSH_COMMAND="$(tofu output -raw ssh_command)"
+export VM_NAME="$(tofu output -raw virtual_machine_name)"
+----
+
+Cloud-init waits for the separately attached Raft disk, installs the pinned OpenBao package,
+generates TLS material, configures the host firewall, validates OpenBao configuration, and starts
+the service. Inspect completion and failures through systemd:
+
+[source,shell]
+----
+${SSH_COMMAND} \
+  'sudo systemctl start openbao-bootstrap.service && \
+   sudo systemctl status --no-pager openbao-bootstrap.service openbao.service'
+
+${SSH_COMMAND} \
+  'sudo journalctl -u openbao-bootstrap -u openbao --no-pager'
+----
+
+== Trust the Lab CA
+
+Retrieve the expected CA fingerprint through Azure Run Command, then store the public CA outside the
+repository and compare it. This uses the Azure control plane as an independent trust path rather
+than trusting first-use SSH for both values:
+
+[source,shell]
+----
+umask 077
+export BAO_CACERT="${HOME}/openbao-lab-ca.crt"
+
+az vm run-command invoke \
+  --resource-group "${RESOURCE_GROUP_NAME}" \
+  --name "${VM_NAME}" \
+  --command-id RunShellScript \
+  --scripts 'openssl x509 -in /opt/openbao/tls/ca.crt -noout -sha256 -fingerprint' \
+  --query 'value[0].message' \
+  --output tsv
+
+${SSH_COMMAND} 'sudo cat /opt/openbao/tls/ca.crt' > "${BAO_CACERT}"
+openssl x509 -in "${BAO_CACERT}" -noout -sha256 -fingerprint
+----
+
+The fingerprints must match. Before initialization, the health endpoint should return HTTP `501`:
+
+[source,shell]
+----
+curl --silent --show-error \
+  --cacert "${BAO_CACERT}" \
+  --output /dev/null \
+  --write-out '%{http_code}\n' \
+  "${BAO_ADDR}/v1/sys/health"
+----
+
+== Initialize and Unseal
+
+Initialization is an OpenBao security ceremony, not infrastructure provisioning. Keep its output in
+an approved secure location outside this repository. For a disposable single-operator lab, encrypt
+one unseal share and the initial root token to an existing PGP public key:
+
+[source,shell]
+----
+export PGP_PUBLIC_KEY="/secure/path/operator-public.gpg"
+export INIT_OUTPUT="/secure/path/openbao-init-encrypted.json"
+umask 077
+
+bao operator init \
+  -key-shares=1 \
+  -key-threshold=1 \
+  -pgp-keys="${PGP_PUBLIC_KEY}" \
+  -root-token-pgp-key="${PGP_PUBLIC_KEY}" \
+  -format=json > "${INIT_OUTPUT}"
+----
+
+Decrypt the share directly into the hidden prompt of `bao operator unseal`. Read the root token into
+a temporary environment variable through another hidden prompt rather than letting `bao login`
+write it to a token-helper file. Do not write plaintext material to files, shell history, OpenTofu
+variables, state, cloud-init, or CI logs.
+
+[source,shell]
+----
+bao operator unseal
+IFS= read -r -s -p "Initial root token: " BAO_TOKEN
+printf '\n'
+export BAO_TOKEN
+bao status
+bao operator raft list-peers
+----
+
+After unseal, the health endpoint returns HTTP `200`. A service or VM restart seals this Shamir
+configuration again and requires another manual unseal.
+
+== Exercise KV v2
+
+[source,shell]
+----
+bao secrets enable -path=lab -version=2 kv
+bao kv put -mount=lab application/config username=demo password=not-a-real-secret
+bao kv get -mount=lab application/config
+bao kv put -mount=lab -cas=1 application/config username=demo-v2
+bao kv get -mount=lab -version=1 application/config
+----
+
+The comparison lesson replaces these visible demonstration values with protected runtime input and
+tests stale compare-and-set behavior.
+
+== Exercise the PKI Engine
+
+This simplified lab root issues leaf certificates directly. Production PKI normally keeps its root
+offline and delegates issuance to an intermediate CA.
+
+[source,shell]
+----
+bao secrets enable -path=pki-lab pki
+bao secrets tune -max-lease-ttl=87600h pki-lab
+
+bao write pki-lab/root/generate/internal common_name=lab.internal ttl=87600h
+bao write pki-lab/config/urls \
+  issuing_certificates="${BAO_ADDR}/v1/pki-lab/ca" \
+  crl_distribution_points="${BAO_ADDR}/v1/pki-lab/crl"
+bao write pki-lab/roles/lab-internal \
+  allowed_domains=lab.internal \
+  allow_subdomains=true \
+  allow_bare_domains=false \
+  allow_localhost=false \
+  max_ttl=24h
+----
+
+The `/issue` endpoint returns a private key once. Direct its JSON response to protected storage
+outside the repository rather than printing it:
+
+[source,shell]
+----
+umask 077
+bao write -format=json pki-lab/issue/lab-internal \
+  common_name=app.lab.internal \
+  ttl=1h > /secure/path/app-lab-internal.json
+
+bao pki health-check pki-lab/
+----
+
+Warnings about direct root issuance and simplified maintenance are expected for this lab.
+
+== State and Operations
+
+OpenTofu state contains the rendered cloud-init configuration, public SSH key, resource metadata,
+and network addresses. It contains no listener private key, unseal share, root token, runtime
+secret, or issued certificate private key.
+
+Take application-consistent Raft snapshots with `bao operator raft snapshot save`; an Azure disk
+snapshot alone is not an OpenBao backup strategy. Snapshots remain sensitive and require the
+matching seal material.
+
+Run `tofu plan -lock-timeout=1m` after runtime configuration. It should report no infrastructure
+changes because OpenBao's data plane is outside OpenTofu ownership.
+
+== Destroy
+
+Destroying the VM and disk permanently removes this disposable OpenBao data unless an external Raft
+snapshot was retained:
+
+[source,shell]
+----
+tofu plan -destroy -out=openbao-vm-destroy.tfplan
+tofu apply openbao-vm-destroy.tfplan
+az group exists --name "${RESOURCE_GROUP_NAME}"
+----
+
+The final command must print `false`. Run `unset BAO_TOKEN`, then remove the local CA, encrypted
+initialization output, Raft snapshots, and issued certificate files according to their storage
+system's data-retention policy.
+
+== Explicit Limitations
+
+* One node provides no service availability or Raft quorum tolerance.
+* The public API is acceptable only for this lab because NSG and UFW rules restrict it to one `/32`.
+* `Standard_B2s_v2` uses CPU credits and can be throttled after sustained load.
+* Manual Shamir unseal causes downtime after every restart.
+* The package is pinned; upgrades require an explicit compatibility review.
+* The listener certificate has no renewal path after its bootstrap CA key is deleted.
+* This is not a production OpenBao, networking, backup, or PKI architecture.
+
+== Further Reading
+
+* https://openbao.org/docs/install/[Install OpenBao]
+* https://openbao.org/docs/configuration/storage/raft/[Integrated Raft storage]
+* https://openbao.org/docs/concepts/seal/[Seal and unseal concepts]
+* https://openbao.org/docs/secrets/kv/kv-v2/[KV version 2]
+* https://openbao.org/docs/secrets/pki/quick-start-root-ca/[PKI root quick start]

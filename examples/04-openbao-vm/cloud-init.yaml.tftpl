@@ -1,0 +1,272 @@
+#cloud-config
+write_files:
+  - path: /usr/local/sbin/openbao-bootstrap
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -Eeuo pipefail
+      exec > >(tee -a /var/log/openbao-bootstrap.log) 2>&1
+
+      FQDN='${fqdn}'
+      PRIVATE_IP='${private_ip}'
+      CALLER_CIDR='${caller_ipv4_cidr}'
+      OPENBAO_VERSION='${openbao_version}'
+      OPENBAO_GPG_FINGERPRINT='${openbao_gpg_fingerprint}'
+      DATA_DEVICE='/dev/disk/azure/scsi1/lun0'
+      DATA_MOUNT='/opt/openbao/data'
+      POLICY_RC='/usr/sbin/policy-rc.d'
+      POLICY_CREATED=0
+      TLS_TMP=''
+
+      cleanup() {
+        if [ "$POLICY_CREATED" -eq 1 ]; then
+          rm -f "$POLICY_RC"
+        fi
+        if [ -n "$TLS_TMP" ]; then
+          rm -rf "$TLS_TMP"
+        fi
+        rm -f /run/openbao-signing-key.asc
+      }
+      trap cleanup EXIT
+
+      echo 'Waiting for the OpenTofu-managed Raft disk at LUN 0.'
+      for unused in $(seq 1 240); do
+        if [ -b "$DATA_DEVICE" ]; then
+          break
+        fi
+        sleep 5
+      done
+      if [ ! -b "$DATA_DEVICE" ]; then
+        echo "Data disk not found: $DATA_DEVICE" >&2
+        exit 1
+      fi
+
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        ca-certificates curl e2fsprogs gnupg jq openssl parted ufw
+
+      install -d -m 0755 /etc/apt/keyrings
+      curl --fail --silent --show-error --location \
+        https://openbao.org/assets/openbao-gpg-pub-20240618.asc \
+        --output /run/openbao-signing-key.asc
+      primary_key_count=$(gpg --batch --show-keys --with-colons /run/openbao-signing-key.asc \
+        | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')
+      actual_fingerprint=$(gpg --batch --show-keys --with-colons /run/openbao-signing-key.asc \
+        | awk -F: '$1 == "fpr" { print $10; exit }')
+      if [ "$primary_key_count" -ne 1 ] || [ "$actual_fingerprint" != "$OPENBAO_GPG_FINGERPRINT" ]; then
+        echo "Unexpected OpenBao signing-key set or fingerprint: $actual_fingerprint" >&2
+        exit 1
+      fi
+      gpg --batch --yes --dearmor \
+        --output /etc/apt/keyrings/openbao.gpg \
+        /run/openbao-signing-key.asc
+      chmod 0644 /etc/apt/keyrings/openbao.gpg
+
+      printf '%s\n' \
+        'deb [signed-by=/etc/apt/keyrings/openbao.gpg] https://pkgs.openbao.org/deb/ stable main' \
+        > /etc/apt/sources.list.d/openbao.list
+      printf '%s\n' \
+        'Package: openbao' \
+        "Pin: version $OPENBAO_VERSION" \
+        'Pin-Priority: 1001' \
+        > /etc/apt/preferences.d/openbao
+
+      apt-get update
+      if [ -e "$POLICY_RC" ]; then
+        echo "Refusing to replace existing $POLICY_RC" >&2
+        exit 1
+      fi
+      printf '#!/bin/sh\nexit 101\n' > "$POLICY_RC"
+      chmod 0755 "$POLICY_RC"
+      POLICY_CREATED=1
+      apt-get install -y --no-install-recommends "openbao=$OPENBAO_VERSION"
+      rm -f "$POLICY_RC"
+      POLICY_CREATED=0
+      apt-mark hold openbao
+
+      installed_version=$(dpkg-query --show openbao | cut -f2)
+      if [ "$installed_version" != "$OPENBAO_VERSION" ]; then
+        echo "Installed OpenBao $installed_version, expected $OPENBAO_VERSION" >&2
+        exit 1
+      fi
+      systemctl disable --now openbao.service || true
+
+      partition=$(lsblk -nrpo NAME,TYPE "$DATA_DEVICE" | awk '$2 == "part" { print $1; exit }')
+      if [ -z "$partition" ]; then
+        if blkid "$DATA_DEVICE" >/dev/null 2>&1; then
+          echo 'Refusing to repartition a data disk that already contains a filesystem.' >&2
+          exit 1
+        fi
+        parted --script "$DATA_DEVICE" mklabel gpt mkpart primary ext4 1MiB 100%
+        partprobe "$DATA_DEVICE"
+        udevadm settle
+        partition=$(lsblk -nrpo NAME,TYPE "$DATA_DEVICE" | awk '$2 == "part" { print $1; exit }')
+      fi
+      if [ -z "$partition" ]; then
+        echo 'Unable to identify the Raft data partition.' >&2
+        exit 1
+      fi
+
+      filesystem_type=$(blkid -s TYPE -o value "$partition" || true)
+      if [ -z "$filesystem_type" ]; then
+        mkfs.ext4 -F -L openbao-data "$partition"
+      elif [ "$filesystem_type" != 'ext4' ]; then
+        echo "Unexpected filesystem on $partition: $filesystem_type" >&2
+        exit 1
+      fi
+
+      filesystem_uuid=$(blkid -s UUID -o value "$partition")
+      install -d -o openbao -g openbao -m 0700 "$DATA_MOUNT"
+      if ! grep -qE "^UUID=$filesystem_uuid[[:space:]]+$DATA_MOUNT[[:space:]]" /etc/fstab; then
+        if grep -qE "[[:space:]]$DATA_MOUNT[[:space:]]" /etc/fstab; then
+          echo "A different filesystem is already configured at $DATA_MOUNT" >&2
+          exit 1
+        fi
+        printf 'UUID=%s %s ext4 defaults,nofail,nodev,nosuid,noexec 0 2\n' \
+          "$filesystem_uuid" "$DATA_MOUNT" >> /etc/fstab
+      fi
+      if ! mountpoint -q "$DATA_MOUNT"; then
+        mount "$DATA_MOUNT"
+      fi
+      chown openbao:openbao "$DATA_MOUNT"
+      chmod 0700 "$DATA_MOUNT"
+
+      TLS_TMP=$(mktemp -d /run/openbao-tls.XXXXXX)
+      chmod 0700 "$TLS_TMP"
+      umask 077
+      openssl genpkey -algorithm RSA \
+        -pkeyopt rsa_keygen_bits:3072 \
+        -out "$TLS_TMP/ca.key"
+      openssl req -x509 -new -sha256 -days 365 \
+        -key "$TLS_TMP/ca.key" \
+        -subj '/CN=OpenBao Lab Bootstrap CA' \
+        -addext 'basicConstraints=critical,CA:TRUE,pathlen:0' \
+        -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+        -out "$TLS_TMP/ca.crt"
+      openssl genpkey -algorithm RSA \
+        -pkeyopt rsa_keygen_bits:3072 \
+        -out "$TLS_TMP/server.key"
+      openssl req -new -sha256 \
+        -key "$TLS_TMP/server.key" \
+        -subj '/CN=openbao-lab' \
+        -out "$TLS_TMP/server.csr"
+      cat > "$TLS_TMP/server.ext" <<EOF
+      basicConstraints=critical,CA:FALSE
+      keyUsage=critical,digitalSignature,keyEncipherment
+      extendedKeyUsage=serverAuth
+      subjectAltName=DNS:$FQDN,DNS:openbao-lab,IP:$PRIVATE_IP,IP:127.0.0.1
+      EOF
+      openssl x509 -req -sha256 -days 90 \
+        -in "$TLS_TMP/server.csr" \
+        -CA "$TLS_TMP/ca.crt" \
+        -CAkey "$TLS_TMP/ca.key" \
+        -CAcreateserial \
+        -extfile "$TLS_TMP/server.ext" \
+        -out "$TLS_TMP/server.crt"
+      openssl verify -CAfile "$TLS_TMP/ca.crt" "$TLS_TMP/server.crt"
+      cat "$TLS_TMP/server.crt" "$TLS_TMP/ca.crt" > "$TLS_TMP/tls.crt"
+
+      install -d -o openbao -g openbao -m 0700 /opt/openbao/tls
+      install -o openbao -g openbao -m 0600 "$TLS_TMP/server.key" /opt/openbao/tls/tls.key
+      install -o openbao -g openbao -m 0600 "$TLS_TMP/tls.crt" /opt/openbao/tls/tls.crt
+      install -o openbao -g openbao -m 0644 "$TLS_TMP/ca.crt" /opt/openbao/tls/ca.crt
+      install -o root -g root -m 0644 "$TLS_TMP/ca.crt" \
+        /usr/local/share/ca-certificates/openbao-lab-ca.crt
+      update-ca-certificates
+
+      install -d -o openbao -g openbao -m 0700 /etc/openbao
+      cat > /etc/openbao/openbao.hcl <<EOF
+      ui           = true
+      api_addr     = "https://$FQDN:8200"
+      cluster_addr = "https://127.0.0.1:8201"
+
+      storage "raft" {
+        path    = "$DATA_MOUNT"
+        node_id = "openbao-1"
+      }
+
+      listener "tcp" {
+        address                                  = "0.0.0.0:8200"
+        cluster_address                          = "127.0.0.1:8201"
+        tls_cert_file                            = "/opt/openbao/tls/tls.crt"
+        tls_key_file                             = "/opt/openbao/tls/tls.key"
+        tls_min_version                          = "tls12"
+        tls_max_version                          = "tls13"
+        tls_disable_client_certs                 = true
+        disable_unauthed_rekey_endpoints         = true
+        disable_unauthed_generate_root_endpoints = true
+      }
+      EOF
+      chown openbao:openbao /etc/openbao/openbao.hcl
+      chmod 0600 /etc/openbao/openbao.hcl
+      printf 'VAULT_ENABLE_FILE_PERMISSIONS_CHECK=true\n' > /etc/openbao/openbao.env
+      chown openbao:openbao /etc/openbao/openbao.env
+      chmod 0600 /etc/openbao/openbao.env
+
+      install -d -o root -g root -m 0755 /etc/systemd/system/openbao.service.d
+      cat > /etc/systemd/system/openbao.service.d/10-raft-mount.conf <<EOF
+      [Unit]
+      RequiresMountsFor=/opt/openbao/data
+      ConditionPathIsMountPoint=/opt/openbao/data
+      EOF
+
+      runuser --user openbao -- env VAULT_ENABLE_FILE_PERMISSIONS_CHECK=true \
+        /usr/bin/bao operator validate-config -config=/etc/openbao/openbao.hcl
+
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow from "$CALLER_CIDR" to any port 22 proto tcp
+      ufw allow from "$CALLER_CIDR" to any port 8200 proto tcp
+      ufw --force enable
+
+      systemctl daemon-reload
+      systemctl enable --now openbao.service
+
+      health_code=''
+      for unused in $(seq 1 30); do
+        health_code=$(curl --silent --show-error \
+          --cacert /opt/openbao/tls/ca.crt \
+          --output /dev/null \
+          --write-out '%%{http_code}' \
+          https://127.0.0.1:8200/v1/sys/health || true)
+        case "$health_code" in
+          200|501|503) break ;;
+        esac
+        sleep 2
+      done
+      if [ "$health_code" != '200' ] && [ "$health_code" != '501' ] && [ "$health_code" != '503' ]; then
+        echo "Unexpected OpenBao health status: $health_code" >&2
+        exit 1
+      fi
+
+      date --iso-8601=seconds > /var/lib/openbao-bootstrap.complete
+      chmod 0600 /var/lib/openbao-bootstrap.complete
+      echo "OpenBao bootstrap complete; health endpoint returned HTTP $health_code."
+
+  - path: /etc/systemd/system/openbao-bootstrap.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Install and configure the OpenBao lab
+      Wants=network-online.target
+      After=network-online.target cloud-final.service
+      ConditionPathExists=!/var/lib/openbao-bootstrap.complete
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/openbao-bootstrap
+      RemainAfterExit=yes
+      Restart=on-failure
+      RestartSec=15s
+      TimeoutStartSec=25min
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, --no-block, openbao-bootstrap.service]

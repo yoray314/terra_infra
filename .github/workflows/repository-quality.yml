@@ -78,6 +78,22 @@ jobs:
         working-directory: examples/03-key-vault
         run: tofu validate -no-color
 
+      - name: Initialize OpenBao VM example
+        working-directory: examples/04-openbao-vm
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate OpenBao VM example
+        working-directory: examples/04-openbao-vm
+        run: tofu validate -no-color
+
+      - name: Validate OpenBao cloud-init template
+        working-directory: examples/04-openbao-vm
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' cloud-init.yaml.tftpl
+          awk '/^      #!\/usr\/bin\/env bash$/{flag=1} flag{sub(/^      /,""); if (/^  - path: \/etc\/systemd\/system\/openbao-bootstrap.service$/) exit; print}' \
+            cloud-init.yaml.tftpl > "${RUNNER_TEMP}/openbao-bootstrap"
+          bash -n "${RUNNER_TEMP}/openbao-bootstrap"
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

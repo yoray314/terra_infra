@@ -121,6 +121,22 @@ jobs:
         working-directory: examples/07-private-networking
         run: tofu validate -no-color
 
+      - name: Initialize GitHub OIDC bootstrap
+        working-directory: examples/08-github-oidc/bootstrap
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate GitHub OIDC bootstrap
+        working-directory: examples/08-github-oidc/bootstrap
+        run: tofu validate -no-color
+
+      - name: Initialize GitHub OIDC workload
+        working-directory: examples/08-github-oidc/workload
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate GitHub OIDC workload
+        working-directory: examples/08-github-oidc/workload
+        run: tofu validate -no-color
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

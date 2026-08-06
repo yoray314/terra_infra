@@ -1,0 +1,225 @@
+= Example 08: GitHub Actions OIDC
+
+This example replaces local Azure deployment credentials with short-lived GitHub OIDC tokens. A
+human-run bootstrap creates two user-assigned identities, exact federated credentials, delegated
+resource groups, and state-container roles. A manually dispatched workflow can then plan, apply, or
+destroy a small workload without any Azure client secret in GitHub.
+
+The example deliberately keeps secret rotation and OpenBao administration out of hosted CI. The
+GitHub runner can reach Azure Resource Manager and the public, Entra-protected state endpoint, but it
+cannot reach the private data planes introduced in Example 07.
+
+== Learning Objectives
+
+* Separate identity bootstrap from CI-managed workload resources.
+* Exchange GitHub OIDC assertions for short-lived Azure tokens.
+* Give plan and apply jobs different identities and permissions.
+* Protect apply and destroy through a GitHub environment.
+* Avoid saved-plan artifacts, state artifacts, and long-lived credentials.
+* Understand why read-only remote-state planning uses `-lock=false`.
+
+== Trust Model
+
+[cols="2,3,3",options="header"]
+|===
+| Identity
+| Azure permissions
+| GitHub subject
+
+| Plan
+| Reader on workload resource group; Blob Data Reader on one state container
+| Exact protected branch subject
+
+| Apply
+| Contributor on workload resource group; Blob Data Contributor on one state container
+| Exact `lab` environment subject
+|===
+
+The apply identity cannot create role assignments, alter its own federation, or manage resources
+outside the delegated group. The bootstrap identity remains a privileged human responsibility.
+
+== Prerequisites
+
+Keep the Example 02 state backend running and publicly reachable with Shared Key disabled. Confirm
+`Microsoft.ManagedIdentity` and `Microsoft.Network` are registered. The bootstrap caller needs
+permission to create resource groups, an ARM-managed blob container, role assignments, and
+user-assigned identities. Subscription `Owner` satisfies this disposable lab; production bootstrap
+permissions should be narrower.
+
+Create the protected GitHub environment named `lab` before bootstrap. Configure required reviewers
+and restrict deployment branches to `master`. Environment protection is a security control, not an
+optional convenience. Verify it exists and inspect its protection rules:
+
+[source,shell]
+----
+gh api repos/yoray314/terra_infra/environments/lab \
+  --jq '{name,protection_rules,deployment_branch_policy}'
+
+gh api repos/yoray314/terra_infra/environments/lab/deployment-branch-policies \
+  --jq '.branch_policies[] | {name,type}'
+----
+
+Leave `environment_protection_confirmed = false` until the responses show required reviewers and a
+policy matching `master`. The bootstrap refuses to create apply federation while it remains false.
+
+== Choose Exact OIDC Subjects
+
+Federated credentials do not support wildcard subjects. The conventional subjects for this
+repository are:
+
+[source,text]
+----
+repo:yoray314/terra_infra:ref:refs/heads/master
+repo:yoray314/terra_infra:environment:lab
+----
+
+Repositories created after July 15, 2026, and repositories that opt in, can use immutable owner and
+repository IDs in subjects. Query this repository's OIDC customization before applying:
+
+[source,shell]
+----
+gh api repos/yoray314/terra_infra/actions/oidc/customization/sub
+----
+
+The name-based examples above apply while immutable subjects are disabled. If enabled, use the exact
+ID-based subject documented by GitHub for the returned configuration. An exact mismatch causes token
+exchange to fail safely.
+
+== Bootstrap Identities and Permissions
+
+From `examples/08-github-oidc`, create ignored files and set the actual state account:
+
+[source,shell]
+----
+cp bootstrap/backend.azurerm.tfbackend.example bootstrap/backend.azurerm.tfbackend
+cp bootstrap/terraform.tfvars.example bootstrap/terraform.tfvars
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+
+tofu -chdir=bootstrap init -backend-config=backend.azurerm.tfbackend
+tofu -chdir=bootstrap fmt -check
+tofu -chdir=bootstrap validate
+tofu -chdir=bootstrap plan -out=github-bootstrap.tfplan
+tofu -chdir=bootstrap apply github-bootstrap.tfplan
+----
+
+RBAC and federated credentials can take several minutes to propagate.
+
+== Configure GitHub Variables
+
+Client, tenant, subscription, storage-account, and container IDs are identifiers rather than
+credentials. Store them as GitHub Actions variables, not secrets:
+
+[source,shell]
+----
+gh variable set AZURE_PLAN_CLIENT_ID \
+  --body "$(tofu -chdir=bootstrap output -raw plan_client_id)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_APPLY_CLIENT_ID \
+  --body "$(tofu -chdir=bootstrap output -raw apply_client_id)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_TENANT_ID \
+  --body "$(tofu -chdir=bootstrap output -raw tenant_id)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_SUBSCRIPTION_ID \
+  --body "$(tofu -chdir=bootstrap output -raw subscription_id)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_STATE_STORAGE_ACCOUNT \
+  --body "$(tofu -chdir=bootstrap output -raw state_storage_account_name)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_STATE_CONTAINER \
+  --body "$(tofu -chdir=bootstrap output -raw state_container_name)" \
+  --repo yoray314/terra_infra
+
+gh variable set AZURE_WORKLOAD_RESOURCE_GROUP \
+  --body "$(tofu -chdir=bootstrap output -raw workload_resource_group_name)" \
+  --repo yoray314/terra_infra
+----
+
+No GitHub Actions secret is required for Azure authentication.
+
+== Understand the Workflow
+
+The normal pull-request workflow remains completely offline and has no `id-token: write`
+permission. `.github/workflows/azure-lab.yml` runs only through manual dispatch:
+
+* `plan` uses the read-only identity, does not acquire a blob lease, and does not save a plan.
+* `apply` enters the protected `lab` environment, then creates and applies a fresh plan in one job.
+* `destroy` uses the same protected environment and an explicit destruction plan.
+* Neither job uploads plans, `.terraform`, state, token caches, or command output as artifacts.
+* A concurrency group prevents overlapping changes.
+
+The plan job accepts detailed exit codes `0` and `2` and fails every other result.
+
+Environment approval authorizes the selected operation and commit, not a plan generated beforehand.
+The plan is created after approval and applied exactly in the same isolated job.
+
+== Run the Lab
+
+Merge the workflow and workload to `master`, then dispatch it from that branch:
+
+[source,shell]
+----
+gh workflow run azure-lab.yml \
+  --ref master \
+  --field operation=plan
+
+gh run watch
+----
+
+The first plan should show one virtual network to add. Dispatch `apply`, approve the protected
+environment, and then dispatch `plan` again. The second plan should report no changes.
+
+Inspect the resulting resource through Azure CLI rather than exposing state:
+
+[source,shell]
+----
+az network vnet show \
+  --resource-group "$(tofu -chdir=bootstrap output -raw workload_resource_group_name)" \
+  --name vnet-github-oidc-lab \
+  --query "{name:name,addressSpace:addressSpace.addressPrefixes}" \
+  --output json
+----
+
+== Failure Exercises
+
+* Change one federated subject locally and confirm token exchange fails before Azure access.
+* Remove the plan identity's workload Reader role and confirm state remains readable but refresh
+  fails.
+* Attempt to create a role assignment from the workload and confirm Contributor is insufficient.
+* Start two change dispatches and observe serialization rather than concurrent state writes.
+
+Restore the intended configuration after each exercise. Do not weaken the environment protection
+or grant Owner to make a failing test pass.
+
+== Cleanup
+
+Dispatch `destroy` and approve the `lab` environment. Confirm the target resource group is empty,
+then destroy the bootstrap root locally:
+
+[source,shell]
+----
+gh workflow run azure-lab.yml \
+  --ref master \
+  --field operation=destroy
+
+gh run watch
+
+tofu -chdir=bootstrap plan -destroy -out=github-bootstrap-destroy.tfplan
+tofu -chdir=bootstrap apply github-bootstrap-destroy.tfplan
+----
+
+Never destroy bootstrap first because that removes CI access to the workload state. After the
+workflow destroy succeeds, remove the seven GitHub variables and the `lab` environment if they are
+no longer needed. Keep Example 02 until every remote state root has been destroyed.
+
+== Further Reading
+
+* https://docs.github.com/actions/security-for-github-actions/security-hardening-your-deployments/about-security-hardening-with-openid-connect[GitHub OIDC security]
+* https://learn.microsoft.com/entra/workload-id/workload-identity-federation[Microsoft workload identity federation]
+* https://opentofu.org/docs/v1.12/language/settings/backends/azurerm/[OpenTofu AzureRM backend]

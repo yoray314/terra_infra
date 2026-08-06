@@ -1,0 +1,18 @@
+identity_resource_group_name      = "rg-opentofu-github-identities"
+workload_resource_group_name      = "rg-opentofu-github-workload"
+state_storage_resource_group_name = "rg-opentofu-state"
+state_storage_account_name        = "sttofustate123456"
+workload_state_container_name     = "github-state"
+location                          = "westeurope"
+
+plan_subject  = "repo:yoray314/terra_infra:ref:refs/heads/master"
+apply_subject = "repo:yoray314/terra_infra:environment:lab"
+
+# Set true only after verifying required reviewers and a master-only deployment policy.
+environment_protection_confirmed = false
+
+tags = {
+  environment  = "learning"
+  example      = "08-github-oidc"
+  "managed-by" = "opentofu"
+}

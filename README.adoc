@@ -31,6 +31,7 @@ local-state resource group through remote state and managed secret storage.
 . link:examples/05-secrets-comparison/README.adoc[Compare secret and certificate rotation]
 . link:examples/06-workload-identity/README.adoc[Consume secrets with managed identity]
 . link:examples/07-private-networking/README.adoc[Move secret traffic onto private networking]
+. link:examples/08-github-oidc/README.adoc[Deploy with GitHub Actions OIDC]
 
 == Documentation
 

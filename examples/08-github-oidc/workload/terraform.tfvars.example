@@ -1,0 +1,10 @@
+resource_group_name = "rg-opentofu-github-workload"
+virtual_network_name = "vnet-github-oidc-lab"
+location             = "westeurope"
+address_space        = ["10.80.0.0/16"]
+
+tags = {
+  environment  = "learning"
+  example      = "08-github-oidc"
+  "managed-by" = "github-actions"
+}

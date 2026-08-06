@@ -1,6 +1,7 @@
-resource_group_name = "rg-opentofu-key-vault"
-key_vault_name      = "kv-tofu-replace-1234"
-location            = "westeurope"
+resource_group_name           = "rg-opentofu-key-vault"
+key_vault_name                = "kv-tofu-replace-1234"
+location                      = "westeurope"
+public_network_access_enabled = true
 
 # Replace this documentation address with the workstation's public egress address.
 allowed_ipv4_cidrs = [

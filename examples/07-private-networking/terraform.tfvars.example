@@ -1,0 +1,11 @@
+resource_group_name           = "rg-opentofu-private-networking"
+key_vault_name                = "kv-tofu-replace-1234"
+key_vault_resource_group_name = "rg-opentofu-key-vault"
+openbao_resource_group_name   = "rg-opentofu-openbao"
+
+tags = {
+  environment  = "learning"
+  example      = "07-private-networking"
+  "managed-by" = "opentofu"
+  state         = "azure-blob"
+}

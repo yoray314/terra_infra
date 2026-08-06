@@ -86,6 +86,9 @@ Choose a globally unique Key Vault name containing 3 to 24 letters, digits, or s
 Corporate proxies can use a different egress address than the workstation expects; a
 `ForbiddenByFirewall` response later indicates that this rule needs correction.
 
+Keep `public_network_access_enabled = true` through Example 06. Example 07 creates and verifies a
+private endpoint before changing it to `false`.
+
 == Deploy the Vault
 
 [source,shell]

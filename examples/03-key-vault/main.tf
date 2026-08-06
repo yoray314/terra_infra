@@ -26,7 +26,7 @@ resource "azurerm_key_vault" "example" {
   enabled_for_disk_encryption     = false
   enabled_for_template_deployment = false
 
-  public_network_access_enabled = true
+  public_network_access_enabled = var.public_network_access_enabled
   purge_protection_enabled      = false
   soft_delete_retention_days    = 7
 

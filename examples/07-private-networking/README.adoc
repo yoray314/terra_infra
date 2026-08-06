@@ -1,0 +1,179 @@
+= Example 07: Private Secret Networking
+
+This example moves Key Vault data-plane traffic onto a private endpoint and blocks Internet access
+to the OpenBao API. The consumer VM from Example 06 continues using the standard Key Vault hostname;
+Azure private DNS changes its resolution inside the VNet without changing application credentials.
+
+The lab adds a private endpoint, endpoint subnet, private DNS zone and link, plus one NSG deny rule.
+Private endpoints and DNS zones incur charges while deployed.
+
+== Learning Objectives
+
+* Separate Azure control-plane access from private data-plane access.
+* Resolve the standard Key Vault hostname to a private endpoint inside a VNet.
+* Disable Key Vault public network access only after private validation.
+* Block Internet traffic to a VM service while preserving private subnet traffic.
+* Use an SSH tunnel for operator access without reopening the service port.
+* Understand why a private state backend requires a network-reachable runner.
+
+== Architecture
+
+[source,text]
+----
+consumer subnet 10.42.2.0/24
+  |
+  +--> <vault>.vault.azure.net
+  |       |
+  |       +--> private DNS --> Key Vault private endpoint 10.42.3.x
+  |
+  +--> OpenBao 10.42.1.10:8200
+
+Internet --X--> Key Vault data plane
+Internet --X--> OpenBao TCP 8200
+operator --> SSH 22 --> local tunnel --> OpenBao 8200
+----
+
+The Azure Storage state endpoint deliberately remains public with anonymous and Shared Key access
+disabled. Privatizing it would make local and GitHub-hosted OpenTofu unavailable without VPN,
+private runner, or another connected management path.
+
+== Prerequisites
+
+Examples 02 through 06 must be deployed and the Example 06 consumer must succeed before changing
+network exposure. Confirm `Microsoft.Network` is registered and create ignored configuration files:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+cp terraform.tfvars.example terraform.tfvars
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+----
+
+Set the actual Key Vault name and backend account.
+
+Example 07 moves the existing operator NSG rule from priority 100 to 120 before reserving priority
+100 for the Internet API deny rule. Apply that state-only Example 04 update first:
+
+[source,shell]
+----
+tofu -chdir=../04-openbao-vm plan -out=prepare-private-api.tfplan
+tofu -chdir=../04-openbao-vm apply prepare-private-api.tfplan
+----
+
+== Deploy Private Connectivity First
+
+[source,shell]
+----
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu plan -out=private-networking.tfplan
+tofu apply private-networking.tfplan
+----
+
+Capture outputs and consumer identifiers:
+
+[source,shell]
+----
+export PRIVATE_NETWORK_RESOURCE_GROUP="$(tofu output -raw resource_group_name)"
+export KEY_VAULT_NAME="$(tofu output -raw key_vault_name)"
+export KEY_VAULT_PRIVATE_IP="$(tofu output -raw key_vault_private_ip_address)"
+export CONSUMER_RESOURCE_GROUP="$(tofu -chdir=../06-workload-identity output -raw resource_group_name)"
+export CONSUMER_VM_NAME="$(tofu -chdir=../06-workload-identity output -raw consumer_virtual_machine_name)"
+----
+
+Do not disable the public endpoint yet.
+
+== Verify Private DNS and Access
+
+Resolve the normal service hostname from the consumer VM:
+
+[source,shell]
+----
+az vm run-command invoke \
+  --resource-group "${CONSUMER_RESOURCE_GROUP}" \
+  --name "${CONSUMER_VM_NAME}" \
+  --command-id RunShellScript \
+  --scripts "getent ahostsv4 ${KEY_VAULT_NAME}.vault.azure.net" \
+  --query 'value[0].message' \
+  --output tsv
+----
+
+The result must contain `KEY_VAULT_PRIVATE_IP`. Run the existing consumer again and confirm both
+secret reads still succeed. DNS resolution alone is not proof of access; the authenticated read is
+the required test.
+
+== Disable the Key Vault Public Endpoint
+
+Set the following in `examples/03-key-vault/terraform.tfvars` and apply that root:
+
+[source,hcl]
+----
+public_network_access_enabled = false
+----
+
+[source,shell]
+----
+tofu -chdir=../03-key-vault plan -out=disable-public-vault.tfplan
+tofu -chdir=../03-key-vault apply disable-public-vault.tfplan
+----
+
+Run the consumer once more; it must still succeed through Private Link. From the external
+workstation, a Key Vault data-plane command should now be rejected even if its old `/32` firewall
+rule remains:
+
+[source,shell]
+----
+az keyvault secret list --vault-name "${KEY_VAULT_NAME}" --output none
+----
+
+An access failure is expected. Do not weaken RBAC or reenable public access to make this external
+test pass.
+
+== Use OpenBao Privately
+
+The Example 07 NSG rule denies source service tag `Internet` on TCP 8200 at priority 100. The consumer
+subnet rule remains effective for private VNet traffic. Direct external API access should time out.
+
+Use SSH, which remains restricted to the operator `/32`, to create a local tunnel:
+
+[source,shell]
+----
+ssh -N \
+  -L 127.0.0.1:8200:10.42.1.10:8200 \
+  azureadmin@<OpenBao FQDN>
+----
+
+In another shell, use the existing lab CA. The listener certificate includes `127.0.0.1` as a SAN:
+
+[source,shell]
+----
+export BAO_ADDR="https://127.0.0.1:8200"
+export BAO_CACERT="${HOME}/openbao-lab-ca.crt"
+bao status
+----
+
+The OpenBao VM still has a public IP for SSH administration, but its service API is private from an
+Azure network-policy perspective.
+
+== Teardown Ordering
+
+If the earlier services must remain usable after this lesson, first set
+`public_network_access_enabled = true` in Example 03 and apply it. Then destroy this root:
+
+[source,shell]
+----
+tofu plan -destroy -out=private-networking-destroy.tfplan
+tofu apply private-networking-destroy.tfplan
+az group exists --name "${PRIVATE_NETWORK_RESOURCE_GROUP}"
+----
+
+The final command must print `false`. Destruction also removes the Internet deny rule, endpoint
+subnet, DNS link, and private endpoint. Destroy Example 06 before Examples 04 and 03, and destroy the
+state backend last.
+
+== Further Reading
+
+* https://learn.microsoft.com/azure/key-vault/general/private-link-service[Key Vault Private Link]
+* https://learn.microsoft.com/azure/private-link/private-endpoint-dns[Private endpoint DNS]
+* https://learn.microsoft.com/azure/virtual-network/network-security-groups-overview[Network security groups]

@@ -113,6 +113,14 @@ jobs:
             cloud-init.yaml.tftpl > "${RUNNER_TEMP}/secret-consumer"
           bash -n "${RUNNER_TEMP}/secret-consumer"
 
+      - name: Initialize private-networking example
+        working-directory: examples/07-private-networking
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate private-networking example
+        working-directory: examples/07-private-networking
+        run: tofu validate -no-color
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

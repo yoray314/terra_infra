@@ -42,7 +42,7 @@ resource "azurerm_network_security_group" "openbao" {
 
 resource "azurerm_network_security_rule" "operator" {
   name                        = "AllowOperator"
-  priority                    = 100
+  priority                    = 120
   direction                   = "Inbound"
   access                      = "Allow"
   protocol                    = "Tcp"

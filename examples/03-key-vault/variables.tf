@@ -46,6 +46,13 @@ variable "allowed_ipv4_cidrs" {
   }
 }
 
+variable "public_network_access_enabled" {
+  description = "Whether the Key Vault data plane accepts traffic through its public endpoint."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "location" {
   description = "Azure region used for the Key Vault resources."
   type        = string

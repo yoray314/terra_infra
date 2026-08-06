@@ -94,6 +94,9 @@ jobs:
             cloud-init.yaml.tftpl > "${RUNNER_TEMP}/openbao-bootstrap"
           bash -n "${RUNNER_TEMP}/openbao-bootstrap"
 
+      - name: Validate comparison scripts
+        run: bash -n examples/05-secrets-comparison/scripts/*.sh examples/05-secrets-comparison/scripts/*.bash
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

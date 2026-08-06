@@ -1,0 +1,201 @@
+= Example 05: Compare Secret and Certificate Rotation
+
+This example compares Azure Key Vault and OpenBao data-plane behavior without adding
+infrastructure. Keep the Example 03 vault and Example 04 OpenBao VM running, initialized, and
+unsealed. The scripts create versions and certificates while leaving both OpenTofu states unchanged.
+
+The comparison is deliberately operational rather than feature-for-feature. Key Vault is a managed
+Azure service; OpenBao is a self-hosted platform whose availability, storage, TLS, seal, upgrades,
+and backups are the operator's responsibility.
+
+== Learning Objectives
+
+* Compare opaque Key Vault secret versions with numbered OpenBao KV v2 versions.
+* Observe OpenBao compare-and-set protection against stale writers.
+* Compare named Key Vault certificate versions with independent OpenBao PKI issuances.
+* Keep secret values and certificate private keys out of arguments, Git, and OpenTofu state.
+* Identify which cleanup and rollback operations each system supports.
+
+== Safety Model
+
+The scripts require a writable, user-owned, mode-0700 `XDG_RUNTIME_DIR`, normally
+`/run/user/<uid>` on Linux. Secret values and transient files exist only in a mode-0700 runtime
+directory and are removed on exit. OpenBao leaf private keys are intentionally retained only in the
+explicitly approved external directory configured later. Nothing is created below the repository
+root. Do not run the scripts with shell tracing, `--debug`, or terminal recording enabled.
+
+Temporary deletion is not guaranteed secure erasure on every storage system. The runtime-directory
+requirement avoids claiming that `shred` can solve SSD, snapshot, or copy-on-write behavior.
+
+== Configure Both Services
+
+Export the Key Vault name from Example 03:
+
+[source,shell]
+----
+export KEY_VAULT_NAME="$(tofu -chdir=../03-key-vault output -raw key_vault_name)"
+----
+
+Configure the OpenBao client using the values established in Example 04:
+
+[source,shell]
+----
+export BAO_ADDR="https://<OpenBao FQDN>:8200"
+export BAO_CACERT="${HOME}/openbao-lab-ca.crt"
+unset BAO_SKIP_VERIFY BAO_AGENT_ADDR
+IFS= read -r -s -p "OpenBao token: " BAO_TOKEN
+printf '\n'
+export BAO_TOKEN
+----
+
+The OpenBao `lab` KV v2 mount and `pki-lab/lab-internal` role must already exist. Use a scoped
+operator token if available; the secret script's fail-closed mount check also requires read access
+to `sys/mounts`. The initial root token is acceptable only for this disposable sequence.
+
+== Compare Secret Rotation
+
+Create two Key Vault versions. Each invocation prompts without echoing the value and prints only the
+new versioned object ID:
+
+[source,shell]
+----
+export KEY_VAULT_SECRET_NAME="comparison-token"
+FIRST_KEY_VAULT_ID="$(scripts/rotate-key-vault-secret.sh)"
+SECOND_KEY_VAULT_ID="$(scripts/rotate-key-vault-secret.sh)"
+test "${FIRST_KEY_VAULT_ID}" != "${SECOND_KEY_VAULT_ID}"
+
+az keyvault secret list-versions \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${KEY_VAULT_SECRET_NAME}" \
+  --query "[].{id:id,enabled:attributes.enabled,created:attributes.created}" \
+  --output table
+----
+
+Create two OpenBao versions. The script reads the current metadata and performs a CAS write, so a
+concurrent update cannot be silently overwritten:
+
+[source,shell]
+----
+export OPENBAO_KV_MOUNT="lab"
+export OPENBAO_SECRET_PATH="comparison/token"
+FIRST_OPENBAO_VERSION="$(OPENBAO_EXPECTED_VERSION=0 scripts/rotate-openbao-secret.sh)"
+SECOND_OPENBAO_VERSION="$(scripts/rotate-openbao-secret.sh)"
+
+bao kv metadata get \
+  -format=json \
+  -mount="${OPENBAO_KV_MOUNT}" \
+  "${OPENBAO_SECRET_PATH}" \
+  | jq '.data | {current_version,oldest_version,versions}'
+----
+
+Prove stale-writer rejection by intentionally supplying the first version after the second exists:
+
+[source,shell]
+----
+OPENBAO_EXPECTED_VERSION="${FIRST_OPENBAO_VERSION}" \
+  scripts/rotate-openbao-secret.sh
+----
+
+The command must fail with a check-and-set error. The prompted value is removed without being
+written. Key Vault creates a new version for concurrent writes but does not offer equivalent CLI CAS
+semantics.
+
+== Compare Certificate Rotation
+
+Create two Key Vault certificate versions. Key Vault generates and retains each non-exportable
+private key:
+
+[source,shell]
+----
+export KEY_VAULT_CERTIFICATE_NAME="comparison-certificate"
+scripts/rotate-key-vault-certificate.sh
+scripts/rotate-key-vault-certificate.sh
+
+az keyvault certificate list-versions \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${KEY_VAULT_CERTIFICATE_NAME}" \
+  --query "[].{id:id,thumbprint:x509ThumbprintHex,enabled:attributes.enabled,expires:attributes.expires}" \
+  --output table
+----
+
+Create a protected output directory outside the repository. The script generates each private key
+locally, submits only a CSR to OpenBao, and retains the usable key, certificate, and CA in a distinct
+mode-0700 version directory:
+
+[source,shell]
+----
+export OPENBAO_PKI_MOUNT="pki-lab"
+export OPENBAO_PKI_ROLE="lab-internal"
+export OPENBAO_CERTIFICATE_COMMON_NAME="comparison.lab.internal"
+export OPENBAO_CERTIFICATE_OUTPUT_DIR="/secure/path/openbao-certificates"
+mkdir -p "${OPENBAO_CERTIFICATE_OUTPUT_DIR}"
+chmod 0700 "${OPENBAO_CERTIFICATE_OUTPUT_DIR}"
+
+scripts/rotate-openbao-certificate.sh
+scripts/rotate-openbao-certificate.sh
+----
+
+The OpenBao serial numbers, fingerprints, and public-key hashes must differ. Both short-lived
+certificates and their private keys can remain available during an overlap window; issuance is not
+a named-version rollback mechanism. The documented PKI role does not generate OpenBao leases, so
+revocation is certificate/serial based rather than lease based.
+
+== Behavioral Comparison
+
+[cols="2,3,3",options="header"]
+|===
+| Operation
+| Azure Key Vault
+| OpenBao
+
+| Secret update
+| New opaque version under one name
+| New numeric KV v2 version
+
+| Concurrent write protection
+| Concurrent writes create additional versions
+| Native check-and-set rejects stale writers
+
+| Old secret handling
+| Disable versions; deletion acts on the named object
+| Read, soft-delete, undelete, or destroy individual versions
+
+| Leaf certificate rotation
+| Versions link certificate, key, and secret objects
+| Each issuance is an independent serial; leases are optional and not enabled in this lab
+
+| Private key location
+| Generated and retained non-exportably by Key Vault
+| Generated by this client; OpenBao signs its CSR
+
+| Operational ownership
+| Azure operates availability and storage
+| The lab operator owns VM, Raft, TLS, seal, backup, and upgrades
+|===
+
+== Confirm OpenTofu Isolation
+
+[source,shell]
+----
+tofu -chdir=../03-key-vault plan -lock-timeout=1m
+tofu -chdir=../04-openbao-vm plan -lock-timeout=1m
+git status --short
+----
+
+Both plans should report no infrastructure changes, and no secret or private-key file should appear
+under the repository. The data-plane objects are intentionally not OpenTofu resources.
+
+== Cleanup
+
+Run `unset BAO_TOKEN` when finished. Destroy Example 04 before Example 03 if both are no longer
+needed, then destroy the shared Example 02 backend last. Infrastructure destruction does not remove
+the private keys retained in `OPENBAO_CERTIFICATE_OUTPUT_DIR`; delete those directories separately
+when the overlap test is complete. Preserve only deliberately approved backups or public
+certificate metadata.
+
+== Further Reading
+
+* https://learn.microsoft.com/azure/key-vault/secrets/about-secrets[About Key Vault secrets]
+* https://openbao.org/docs/secrets/kv/kv-v2/[OpenBao KV v2]
+* https://learn.microsoft.com/azure/key-vault/certificates/about-certificates[About Key Vault certificates]
+* https://openbao.org/docs/secrets/pki/[OpenBao PKI]

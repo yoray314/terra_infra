@@ -97,6 +97,22 @@ jobs:
       - name: Validate comparison scripts
         run: bash -n examples/05-secrets-comparison/scripts/*.sh examples/05-secrets-comparison/scripts/*.bash
 
+      - name: Initialize workload-identity example
+        working-directory: examples/06-workload-identity
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate workload-identity example
+        working-directory: examples/06-workload-identity
+        run: tofu validate -no-color
+
+      - name: Validate workload consumer template
+        working-directory: examples/06-workload-identity
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' cloud-init.yaml.tftpl
+          awk '/^      #!\/usr\/bin\/env bash$/{flag=1} flag{sub(/^      /,""); print}' \
+            cloud-init.yaml.tftpl > "${RUNNER_TEMP}/secret-consumer"
+          bash -n "${RUNNER_TEMP}/secret-consumer"
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

@@ -38,30 +38,34 @@ resource "azurerm_network_security_group" "openbao" {
   location            = azurerm_resource_group.openbao.location
   resource_group_name = azurerm_resource_group.openbao.name
   tags                = var.tags
+}
 
-  security_rule {
-    name                       = "AllowOperator"
-    priority                   = 100
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_ranges    = ["22", "8200"]
-    source_address_prefix      = var.caller_ipv4_cidr
-    destination_address_prefix = "*"
-  }
+resource "azurerm_network_security_rule" "operator" {
+  name                        = "AllowOperator"
+  priority                    = 100
+  direction                   = "Inbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_ranges     = ["22", "8200"]
+  source_address_prefix       = var.caller_ipv4_cidr
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.openbao.name
+  network_security_group_name = azurerm_network_security_group.openbao.name
+}
 
-  security_rule {
-    name                       = "DenyAllInbound"
-    priority                   = 4096
-    direction                  = "Inbound"
-    access                     = "Deny"
-    protocol                   = "*"
-    source_port_range          = "*"
-    destination_port_range     = "*"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
+resource "azurerm_network_security_rule" "deny_all_inbound" {
+  name                        = "DenyAllInbound"
+  priority                    = 4096
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "*"
+  destination_address_prefix  = "*"
+  resource_group_name         = azurerm_resource_group.openbao.name
+  network_security_group_name = azurerm_network_security_group.openbao.name
 }
 
 resource "azurerm_network_interface" "openbao" {

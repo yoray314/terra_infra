@@ -1,0 +1,12 @@
+resource_group_name           = "rg-opentofu-secret-consumer"
+key_vault_name                = "kv-tofu-replace-1234"
+key_vault_resource_group_name = "rg-opentofu-key-vault"
+openbao_resource_group_name   = "rg-opentofu-openbao"
+ssh_public_key_path           = "~/.ssh/id_ed25519.pub"
+
+tags = {
+  environment  = "learning"
+  example      = "06-workload-identity"
+  "managed-by" = "opentofu"
+  state         = "azure-blob"
+}

@@ -29,6 +29,7 @@ local-state resource group through remote state and managed secret storage.
 . link:examples/03-key-vault/README.adoc[Manage secrets and certificates with Azure Key Vault]
 . link:examples/04-openbao-vm/README.adoc[Deploy a non-production OpenBao VM lab]
 . link:examples/05-secrets-comparison/README.adoc[Compare secret and certificate rotation]
+. link:examples/06-workload-identity/README.adoc[Consume secrets with managed identity]
 
 == Documentation
 

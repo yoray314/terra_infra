@@ -1,0 +1,143 @@
+#cloud-config
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - jq
+write_files:
+  - path: /usr/local/sbin/secret-consumer
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -Eeuo pipefail
+      set +x
+
+      IDENTITY_CLIENT_ID='${identity_client_id}'
+      KEY_VAULT_NAME='${key_vault_name}'
+      KEY_VAULT_SECRET_NAME='${key_vault_secret_name}'
+      OPENBAO_ADDR='${openbao_address}'
+      OPENBAO_CA_SECRET_NAME='${openbao_ca_secret_name}'
+      OPENBAO_ROLE_ID_SECRET_NAME='${openbao_role_id_secret}'
+      OPENBAO_SECRET_ID_SECRET_NAME='${openbao_secret_id_secret}'
+      OPENBAO_MOUNT='${openbao_workload_mount}'
+      OPENBAO_PATH='${openbao_workload_path}'
+
+      RUNTIME_DIRECTORY=$(mktemp -d /run/secret-consumer.XXXXXX)
+      chmod 0700 "$RUNTIME_DIRECTORY"
+      cleanup() {
+        rm -rf -- "$RUNTIME_DIRECTORY"
+      }
+      trap cleanup EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+
+      TOKEN_RESPONSE=''
+      for attempt in 1 2 3 4 5; do
+        if TOKEN_RESPONSE=$(curl --disable \
+          --fail \
+          --silent \
+          --show-error \
+          --noproxy '*' \
+          --connect-timeout 2 \
+          --max-time 20 \
+          --header 'Metadata: true' \
+          "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2019-08-01&resource=https%3A%2F%2Fvault.azure.net&client_id=$IDENTITY_CLIENT_ID"); then
+          break
+        fi
+        TOKEN_RESPONSE=''
+        sleep "$attempt"
+      done
+      if [[ -z $TOKEN_RESPONSE ]]; then
+        echo 'Managed-identity token request failed after five attempts.' >&2
+        exit 1
+      fi
+      KEY_VAULT_TOKEN=$(jq -er '.access_token' <<< "$TOKEN_RESPONSE")
+      unset TOKEN_RESPONSE
+
+      KEY_VAULT_CURL_CONFIG="$RUNTIME_DIRECTORY/key-vault.curl"
+      printf 'silent\nshow-error\nfail\nconnect-timeout = 5\nmax-time = 30\nheader = "Authorization: Bearer %s"\n' \
+        "$KEY_VAULT_TOKEN" > "$KEY_VAULT_CURL_CONFIG"
+      chmod 0600 "$KEY_VAULT_CURL_CONFIG"
+      unset KEY_VAULT_TOKEN
+
+      get_key_vault_secret() {
+        local secret_name=$1
+        local response=''
+        local attempt
+
+        for attempt in 1 2 3 4 5; do
+          if response=$(curl --disable --config "$KEY_VAULT_CURL_CONFIG" \
+            "https://$KEY_VAULT_NAME.vault.azure.net/secrets/$secret_name?api-version=7.4"); then
+            printf '%s' "$response"
+            return 0
+          fi
+          response=''
+          sleep "$attempt"
+        done
+        return 1
+      }
+
+      KEY_VAULT_RESPONSE=$(get_key_vault_secret "$KEY_VAULT_SECRET_NAME")
+      KEY_VAULT_VALUE=$(jq -er '.value' <<< "$KEY_VAULT_RESPONSE")
+      KEY_VAULT_VERSION=$(jq -er '.id | split("/") | last' <<< "$KEY_VAULT_RESPONSE")
+      unset KEY_VAULT_RESPONSE
+
+      ROLE_RESPONSE=$(get_key_vault_secret "$OPENBAO_ROLE_ID_SECRET_NAME")
+      jq -jer '.value' <<< "$ROLE_RESPONSE" > "$RUNTIME_DIRECTORY/role-id"
+      unset ROLE_RESPONSE
+      chmod 0600 "$RUNTIME_DIRECTORY/role-id"
+
+      SECRET_ID_RESPONSE=$(get_key_vault_secret "$OPENBAO_SECRET_ID_SECRET_NAME")
+      jq -jer '.value' <<< "$SECRET_ID_RESPONSE" > "$RUNTIME_DIRECTORY/secret-id"
+      unset SECRET_ID_RESPONSE
+      chmod 0600 "$RUNTIME_DIRECTORY/secret-id"
+
+      CA_RESPONSE=$(get_key_vault_secret "$OPENBAO_CA_SECRET_NAME")
+      jq -er '.value' <<< "$CA_RESPONSE" > "$RUNTIME_DIRECTORY/openbao-ca.pem"
+      unset CA_RESPONSE
+      chmod 0600 "$RUNTIME_DIRECTORY/openbao-ca.pem"
+
+      jq -n \
+        --rawfile role_id "$RUNTIME_DIRECTORY/role-id" \
+        --rawfile secret_id "$RUNTIME_DIRECTORY/secret-id" \
+        '{role_id:$role_id,secret_id:$secret_id}' > "$RUNTIME_DIRECTORY/approle.json"
+      chmod 0600 "$RUNTIME_DIRECTORY/approle.json"
+
+      LOGIN_RESPONSE=$(curl --disable \
+        --fail \
+        --silent \
+        --show-error \
+        --connect-timeout 5 \
+        --max-time 30 \
+        --cacert "$RUNTIME_DIRECTORY/openbao-ca.pem" \
+        --header 'Content-Type: application/json' \
+        --data-binary "@$RUNTIME_DIRECTORY/approle.json" \
+        "$OPENBAO_ADDR/v1/auth/approle/login")
+      OPENBAO_TOKEN=$(jq -er '.auth.client_token' <<< "$LOGIN_RESPONSE")
+      OPENBAO_TOKEN_TTL=$(jq -er '.auth.lease_duration' <<< "$LOGIN_RESPONSE")
+      unset LOGIN_RESPONSE
+      rm -f -- "$RUNTIME_DIRECTORY/role-id" "$RUNTIME_DIRECTORY/secret-id" \
+        "$RUNTIME_DIRECTORY/approle.json"
+
+      OPENBAO_CURL_CONFIG="$RUNTIME_DIRECTORY/openbao.curl"
+      printf 'silent\nshow-error\nfail\nconnect-timeout = 5\nmax-time = 30\ncacert = "%s"\nheader = "X-Vault-Token: %s"\n' \
+        "$RUNTIME_DIRECTORY/openbao-ca.pem" "$OPENBAO_TOKEN" > "$OPENBAO_CURL_CONFIG"
+      chmod 0600 "$OPENBAO_CURL_CONFIG"
+      unset OPENBAO_TOKEN
+
+      OPENBAO_RESPONSE=$(curl --disable --config "$OPENBAO_CURL_CONFIG" \
+        "$OPENBAO_ADDR/v1/$OPENBAO_MOUNT/data/$OPENBAO_PATH")
+      OPENBAO_VALUE=$(jq -er '.data.data.value' <<< "$OPENBAO_RESPONSE")
+      OPENBAO_VERSION=$(jq -er '.data.metadata.version' <<< "$OPENBAO_RESPONSE")
+      unset OPENBAO_RESPONSE
+
+      test -n "$KEY_VAULT_VALUE"
+      test -n "$OPENBAO_VALUE"
+      unset KEY_VAULT_VALUE OPENBAO_VALUE
+
+      jq -n \
+        --arg key_vault_version "$KEY_VAULT_VERSION" \
+        --arg openbao_version "$OPENBAO_VERSION" \
+        --argjson openbao_token_ttl "$OPENBAO_TOKEN_TTL" \
+        '{keyVault:{version:$key_vault_version,readSucceeded:true},openBao:{version:$openbao_version,readSucceeded:true,tokenTtlSeconds:$openbao_token_ttl}}'

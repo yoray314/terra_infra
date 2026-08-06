@@ -1,0 +1,275 @@
+= Example 06: Workload Identity Consumer
+
+This example deploys a private VM with a user-assigned managed identity. The VM authenticates to
+Azure Key Vault without a stored Azure credential, retrieves a scoped OpenBao AppRole credential,
+exchanges it for a short-lived OpenBao token, and reads one secret from each service.
+
+OpenBao 2.6 does not provide a native Azure managed-identity auth method. AppRole is therefore an
+explicit bootstrap bridge: its SecretID lives in Key Vault instead of on the VM or in OpenTofu
+state. A later lesson can compare this design with JWT authentication where tenant policy permits a
+dedicated Entra application audience.
+
+== Learning Objectives
+
+* Attach a stable user-assigned identity to a replaceable VM.
+* Grant the identity only Key Vault secret-read access.
+* Use managed identity to retrieve a secondary service credential.
+* Exchange AppRole credentials for a short-lived OpenBao token.
+* Keep tokens and secret values out of cloud-init, process arguments, state, and logs.
+* Observe secret rotation without redeploying infrastructure.
+
+== Cross-Stack Design
+
+This root deliberately depends on resources managed by earlier states:
+
+[source,text]
+----
+Example 03 Key Vault
+  ^
+  | managed identity + Key Vault Secrets User
+  |
+consumer VM -- private subnet --> Example 04 OpenBao VM
+  |
+  +--> static NAT egress used by the Key Vault firewall
+----
+
+The consumer root owns its identity, VM, NAT gateway, Key Vault role assignment, and a new subnet
+inside the existing OpenBao VNet. Destroy this root before either dependency.
+
+== Prerequisites
+
+Examples 02, 03, and 04 must be deployed. OpenBao must be initialized and unsealed, with the `lab`
+KV v2 mount available. The consumer automatically uses the existing OpenBao VNet's region; the Key
+Vault can remain in the Example 03 region.
+
+Create ignored backend and input files:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+cp terraform.tfvars.example terraform.tfvars
+----
+
+Set the actual globally unique Key Vault name and the Example 02 backend account. Export Azure
+provider context:
+
+[source,shell]
+----
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+----
+
+Because automatic provider registration is disabled, confirm `Microsoft.ManagedIdentity` is
+registered before applying:
+
+[source,shell]
+----
+az provider show --namespace Microsoft.ManagedIdentity --query registrationState --output tsv
+----
+
+== Allow the Private Consumer Path
+
+This branch refactors the Example 04 inline NSG rules into independently managed rule resources.
+Apply that state-preserving update from the OpenBao root before creating the consumer:
+
+[source,shell]
+----
+tofu -chdir=../04-openbao-vm plan -out=allow-consumer.tfplan
+tofu -chdir=../04-openbao-vm apply allow-consumer.tfplan
+----
+
+The consumer root owns and later removes its `AllowConsumerSubnet` NSG rule. The matching host
+firewall rule is added after the consumer outputs are available.
+
+== Deploy the Consumer
+
+[source,shell]
+----
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu plan -out=workload-identity.tfplan
+tofu apply workload-identity.tfplan
+----
+
+Capture outputs:
+
+[source,shell]
+----
+export CONSUMER_RESOURCE_GROUP="$(tofu output -raw resource_group_name)"
+export CONSUMER_VM_NAME="$(tofu output -raw consumer_virtual_machine_name)"
+export CONSUMER_EGRESS_CIDR="$(tofu output -raw outbound_public_ip_cidr)"
+export KEY_VAULT_NAME="$(tofu output -raw key_vault_name)"
+export KEY_VAULT_SECRET_NAME="$(tofu output -raw key_vault_secret_name)"
+export OPENBAO_RESOURCE_GROUP="$(tofu output -raw openbao_resource_group_name)"
+export OPENBAO_ROLE_ID_SECRET_NAME="$(tofu output -raw openbao_role_id_secret_name)"
+export OPENBAO_SECRET_ID_SECRET_NAME="$(tofu output -raw openbao_secret_id_secret_name)"
+export OPENBAO_CA_SECRET_NAME="$(tofu output -raw openbao_ca_secret_name)"
+export OPENBAO_MOUNT="$(tofu output -raw openbao_workload_mount)"
+export OPENBAO_PATH="$(tofu output -raw openbao_workload_path)"
+----
+
+Add the host firewall rule through Azure Run Command before running the consumer and after any
+OpenBao VM replacement. The command contains no secret:
+
+[source,shell]
+----
+az vm run-command invoke \
+  --resource-group "${OPENBAO_RESOURCE_GROUP}" \
+  --name "vm-openbao-lab" \
+  --command-id RunShellScript \
+  --scripts 'ufw allow from 10.42.2.0/24 to any port 8200 proto tcp' \
+  --output none
+----
+
+Add `CONSUMER_EGRESS_CIDR` to `allowed_ipv4_cidrs` in the Example 03 variable file and apply the
+Key Vault firewall update. This two-phase step is necessary because the NAT address does not exist
+until the consumer stack is created.
+
+== Configure OpenBao AppRole
+
+Create a least-privilege policy and AppRole from an authenticated operator shell:
+
+[source,shell]
+----
+set +x
+bao policy write secret-consumer - <<EOF
+path "${OPENBAO_MOUNT}/data/${OPENBAO_PATH}" {
+  capabilities = ["read"]
+}
+EOF
+
+bao auth enable approle
+bao write auth/approle/role/secret-consumer \
+  token_policies=secret-consumer \
+  token_ttl=5m \
+  token_max_ttl=15m \
+  token_num_uses=1 \
+  secret_id_ttl=24h \
+  secret_id_num_uses=10
+
+OPENBAO_ROLE_ID="$(bao read -field=role_id auth/approle/role/secret-consumer/role-id)" || exit
+OPENBAO_SECRET_ID="$(bao write -f -field=secret_id auth/approle/role/secret-consumer/secret-id)" || exit
+----
+
+Write a runtime value to OpenBao without printing it:
+
+[source,shell]
+----
+set +x
+IFS= read -r -s -p "OpenBao consumer value: " CONSUMER_VALUE
+printf '\n'
+printf '%s' "${CONSUMER_VALUE}" \
+  | bao kv put -mount="${OPENBAO_MOUNT}" "${OPENBAO_PATH}" value=- >/dev/null
+unset CONSUMER_VALUE
+----
+
+== Place Bootstrap Material in Key Vault
+
+The consumer identity can read the following named secrets after RBAC propagation. The AppRole
+SecretID is the only secondary-service credential; it expires and must be reissued rather than
+renewed. The role ID and CA are not confidential.
+
+[source,shell]
+----
+set +x
+IFS= read -r -s -p "Key Vault consumer value: " CONSUMER_VALUE
+printf '\n'
+az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${KEY_VAULT_SECRET_NAME}" \
+  --file <(printf '%s' "${CONSUMER_VALUE}") \
+  --encoding utf-8 \
+  --output none
+unset CONSUMER_VALUE
+
+az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${OPENBAO_ROLE_ID_SECRET_NAME}" \
+  --file <(printf '%s' "${OPENBAO_ROLE_ID}") \
+  --encoding utf-8 \
+  --output none
+
+az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${OPENBAO_SECRET_ID_SECRET_NAME}" \
+  --file <(printf '%s' "${OPENBAO_SECRET_ID}") \
+  --encoding utf-8 \
+  --output none
+unset OPENBAO_ROLE_ID OPENBAO_SECRET_ID
+
+az keyvault secret set \
+  --vault-name "${KEY_VAULT_NAME}" \
+  --name "${OPENBAO_CA_SECRET_NAME}" \
+  --file "${BAO_CACERT}" \
+  --encoding utf-8 \
+  --output none
+----
+
+Never enable shell tracing or use `--debug` for these operations.
+
+== Run the Consumer
+
+Azure Run Command invokes a preinstalled script; the request contains no token or secret. The
+script obtains a managed-identity token from IMDS, stores temporary credentials and HTTP
+authorization headers only in a mode-0600 runtime directory, and emits versions and success flags
+rather than values:
+
+[source,shell]
+----
+az vm run-command invoke \
+  --resource-group "${CONSUMER_RESOURCE_GROUP}" \
+  --name "${CONSUMER_VM_NAME}" \
+  --command-id RunShellScript \
+  --scripts 'sudo /usr/local/sbin/secret-consumer' \
+  --query 'value[0].message' \
+  --output tsv
+----
+
+The result reports the Key Vault version, OpenBao KV version, success flags, and short OpenBao token
+TTL. It must not contain either value, the managed-identity token, AppRole SecretID, or OpenBao
+token.
+
+Rotate the configured Key Vault name and OpenBao mount/path using Example 05, run the consumer again,
+and confirm that version IDs change without an OpenTofu apply.
+
+== Trust Boundaries
+
+* Any process on the VM can request tokens for identities attached to it; the whole VM is the
+  managed-identity trust boundary.
+* `Key Vault Secrets User` can read every secret in this lab vault; use separate vaults or narrower
+  secret scopes for stronger workload isolation.
+* AppRole SecretID is an expiring bootstrap credential, not workload identity federation.
+* Azure Run Command metadata and output are retained by Azure, so commands return metadata only.
+* Public Key Vault access remains firewall-restricted; private endpoints are introduced next.
+
+== Destroy
+
+Destroy this root before the OpenBao VM, Key Vault, or shared state backend:
+
+[source,shell]
+----
+tofu plan -destroy -out=workload-identity-destroy.tfplan
+tofu apply workload-identity-destroy.tfplan
+az group exists --name "${CONSUMER_RESOURCE_GROUP}"
+----
+
+The final command must print `false`. Remove the consumer NAT address from the Example 03 firewall,
+delete the OpenBao AppRole, and delete its bootstrap secrets if the earlier services remain running.
+Remove the host firewall exception through the control plane:
+
+[source,shell]
+----
+az vm run-command invoke \
+  --resource-group "${OPENBAO_RESOURCE_GROUP}" \
+  --name "vm-openbao-lab" \
+  --command-id RunShellScript \
+  --scripts 'ufw delete allow from 10.42.2.0/24 to any port 8200 proto tcp' \
+  --output none
+----
+
+== Further Reading
+
+* https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview[Managed identities]
+* https://learn.microsoft.com/azure/key-vault/general/rbac-guide[Key Vault RBAC]
+* https://openbao.org/docs/auth/approle/[OpenBao AppRole]

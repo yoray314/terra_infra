@@ -1,0 +1,14 @@
+resource_group_name = "rg-secret-platform-production"
+location            = "eastus"
+allowed_locations   = ["eastus"]
+enforcement_enabled = false
+
+owner               = "platform-security"
+environment         = "production"
+data_classification = "restricted"
+criticality         = "mission-critical"
+
+tags = {
+  cost-center = "replace-with-approved-cost-center"
+  service     = "secret-platform"
+}

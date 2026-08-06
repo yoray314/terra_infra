@@ -1,0 +1,339 @@
+= Example 12: Production Hardening and Readiness
+
+This final example does not convert the single-node OpenBao lab into production. It creates an empty
+landing-zone resource group and a custom Azure Policy initiative that demonstrates how a platform team
+can establish enforceable prerequisites before production resources arrive.
+
+Azure requires custom policy definitions and initiatives to live at subscription or management-group
+scope. The five definitions in this root are subscription resources, but their only assignment targets
+the new resource group. The assignment starts in `DoNotEnforce` mode. Existing curriculum resource
+groups are deliberately outside its scope.
+
+The resource group and Azure Policy objects have no direct usage charge at the time of writing. A real
+high-availability secret platform, private endpoints, firewalls, monitoring, backup storage, HSMs, and
+cross-region recovery capacity do incur material cost.
+
+== Learning Objectives
+
+* Separate a production readiness decision from a successful infrastructure apply.
+* Pilot deny policies without immediately blocking resource changes.
+* Group versioned custom policies into one scoped initiative.
+* Require ownership, private boundaries, recoverability, and strong storage authentication.
+* Define availability and recovery requirements before choosing Key Vault or OpenBao architecture.
+* Collect evidence for identity, state, networking, operations, backup, and change controls.
+
+== What the Initiative Enforces
+
+[cols="2,3,3",options="header"]
+|===
+| Guardrail
+| Denied configuration
+| Important limitation
+
+| Allowed locations
+| Regional resources outside `allowed_locations`
+| Global resources are exempt; data residency still needs service-specific review
+
+| Required tags
+| Taggable resources missing `owner`, `environment`, `data-classification`, or `criticality`
+| Tags are governance metadata, not authorization controls
+
+| Private boundaries
+| Public IP resources, prefixes or attachments, and Key Vault or Storage public network access
+| Shared network egress belongs in a separately governed connectivity scope
+
+| Key Vault resilience
+| Vaults without purge protection or Azure RBAC authorization
+| Policy cannot prove backup, rotation, least privilege, or recovery readiness
+
+| Storage authentication
+| Shared Key, blob public access, HTTP, or TLS below 1.2
+| Workloads must support Entra authentication before enforcement
+|===
+
+All five definitions use `deny`, but `enforcement_enabled = false` makes the first assignment
+report-only. Azure Policy identifies existing noncompliance; it does not automatically repair these
+resources. This root creates no remediation identity and grants no roles.
+
+The network rule inspects public-IP references on NICs, load balancers, application gateways, NAT
+gateways, Azure Firewall, Bastion, virtual network gateways, and VM scale-set models and child
+instances. This prevents attaching a public IP from another resource group to one of those in-scope
+resources. Recheck aliases when adding a new resource type; a resource-group assignment cannot govern
+a shared connectivity resource that remains entirely outside its scope.
+
+Key Vault recovery requests omit normal create properties. Location, tag, network, and resilience
+rules explicitly exclude `createMode = recover` so governance cannot make a deleted vault
+unrecoverable. Evaluate and remediate the recovered vault immediately after recovery.
+
+== Prerequisites and Scope
+
+Use a nonproduction subscription for the exercise. The caller needs permission to create subscription
+policy definitions and an initiative, plus a resource group and resource-group assignment. The
+`Resource Policy Contributor` role covers policy authoring but does not by itself grant every resource
+permission; design a narrower bootstrap role for the real platform.
+
+Confirm account and providers before planning:
+
+[source,shell]
+----
+az account show --output table
+az provider show --namespace Microsoft.Authorization --query registrationState --output tsv
+az provider show --namespace Microsoft.PolicyInsights --query registrationState --output tsv
+----
+
+Verify the aliases used by the custom rules against the target cloud because provider aliases evolve:
+
+[source,shell]
+----
+az provider show \
+  --namespace Microsoft.KeyVault \
+  --expand resourceTypes/aliases \
+  --query "resourceTypes[?resourceType=='vaults'].aliases[].name" \
+  --output tsv
+
+az provider show \
+  --namespace Microsoft.Storage \
+  --expand resourceTypes/aliases \
+  --query "resourceTypes[?resourceType=='storageAccounts'].aliases[].name" \
+  --output tsv
+----
+
+Install the Azure CLI extension used to inspect Bastion attachment properties:
+
+[source,shell]
+----
+az extension add --name bastion
+----
+
+The native tests verify generated policy JSON and assignment wiring but cannot ask Azure whether an
+alias is supported or whether a deny behaves as intended.
+
+== Configure State and Inputs
+
+Create ignored local configuration in `examples/12-production-hardening`:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+cp terraform.tfvars.example terraform.tfvars
+----
+
+Use a dedicated production state account in a management subscription for a real deployment. Require
+private network access, Entra-only authentication, versioning, soft delete, diagnostic logs, tightly
+scoped data-plane roles, and a recovery procedure. The curriculum backend remains intentionally
+reachable from a local operator and is not the production target architecture.
+
+Set accountable tag values and approved regions. Keep enforcement disabled:
+
+[source,shell]
+----
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu test -no-color
+tofu plan -out=guardrails-report-only.tfplan
+----
+
+Review the scope in the plan. The assignment must target only the new resource group. Stop if a
+definition or assignment is being replaced unexpectedly, if an assignment targets the subscription,
+or if `enforce` is true.
+
+Apply the reviewed plan:
+
+[source,shell]
+----
+tofu apply guardrails-report-only.tfplan
+----
+
+Custom policy names are subscription-unique. One state and owning team should manage each definition;
+do not create competing copies from multiple environment states. The `-v1` names are major-contract
+identifiers; metadata version `1.0.0` is informational. Publish a new definition and stage assignment
+migration for breaking rule changes rather than silently mutating an enforced contract.
+
+== Evaluate Before Enforcement
+
+Azure Policy compliance is eventually consistent. Trigger an evaluation and wait for completion:
+
+[source,shell]
+----
+az policy state trigger-scan \
+  --resource-group "$(tofu output -raw resource_group_name)"
+----
+
+Run the assessment without changing resources:
+
+[source,shell]
+----
+export GUARDRAIL_RESOURCE_GROUP="$(tofu output -raw resource_group_name)"
+export POLICY_ASSIGNMENT_NAME="$(tofu output -raw policy_assignment_name)"
+export EXPECTED_SUBSCRIPTION_ID="${ARM_SUBSCRIPTION_ID}"
+export EXPECTED_ENFORCEMENT_MODE=DoNotEnforce
+export REQUIRE_POLICY_DATA=true
+
+./scripts/assess-guardrails.sh
+----
+
+The script requires the expected subscription and assignment mode, then checks policy summary, public
+IP resources and common attachment points, and both VM scale-set model and live instance addresses.
+It also checks Key Vault and Storage baseline properties and restricts vault inspection to Key Vault
+vaults rather than Managed HSM. It does not inspect secret values. It is a guardrail smoke test, not a
+production certification or substitute for architecture review.
+
+Pilot the initiative against representative positive and negative canary resources in an isolated
+preproduction scope. Confirm every deny returns the intended noncompliance message, valid private
+designs remain deployable, and emergency procedures do not depend on prohibited access paths. OpenTofu
+planning alone does not evaluate Azure Policy.
+
+== Enable Enforcement
+
+Resolve findings and obtain the required approval before changing:
+
+[source,hcl]
+----
+enforcement_enabled = true
+----
+
+Create a new saved plan. It should change only assignment enforcement from `DoNotEnforce` to the
+default enforced mode:
+
+[source,shell]
+----
+tofu plan -out=guardrails-enforced.tfplan
+tofu apply guardrails-enforced.tfplan
+
+export EXPECTED_ENFORCEMENT_MODE=Default
+./scripts/assess-guardrails.sh
+----
+
+An exemption is a security decision, not a troubleshooting shortcut. Require a narrow scope,
+accountable owner, reason, expiration, compensating controls, approval, and periodic review. Manage
+approved exemptions in code and alerts; this lesson intentionally creates none.
+
+== Choose the Production Service
+
+Do not deploy both Key Vault and OpenBao merely because the curriculum demonstrates both.
+
+Choose Key Vault when a managed regional service, native Entra authorization, managed durability, and
+Azure integration satisfy the workload. Validate service limits, regional recovery behavior, purge
+protection, private endpoints, DNS, rotation, backup support for each object type, and tenant-level
+dependencies.
+
+Choose OpenBao when its APIs, auth methods, dynamic-secret engines, tenancy model, or portability are
+required and the organization can operate it continuously. The Example 04 node lacks nearly every
+production property below.
+
+== Define Availability and Recovery
+
+Write measurable requirements before selecting topology:
+
+* Availability objective and error-budget owner.
+* Recovery time objective for service restoration.
+* Recovery point objective for secret and policy data.
+* Maximum tolerable certificate, token, and dynamic-credential outage.
+* Required regions, availability zones, and dependency failure domains.
+* Degraded modes and the workloads allowed to continue during a control-plane outage.
+
+A production OpenBao design normally starts with three or five integrated-storage voters across
+failure domains, private load balancing, no node public IPs, a stable externally managed TLS chain,
+managed-identity auto-unseal, encrypted snapshots outside the cluster failure domain, and tested
+quorum recovery. More nodes are not a substitute for backup, and backup is not proven until a restore
+exercise meets RTO and RPO.
+
+Keep initial root tokens and recovery material out of OpenTofu, CI, chat, tickets, and normal operator
+password managers. Define a witnessed initialization ceremony, separated custody, emergency access,
+rotation after use, and evidence that recovery remains possible when primary identity systems fail.
+
+== Production Evidence Gate
+
+[cols="2,3,3",options="header"]
+|===
+| Control area
+| Required evidence
+| Example accountable owner
+
+| Architecture
+| Threat model, dependency map, capacity model, failure-domain and regional design
+| Platform architect
+
+| Identity
+| Exact OIDC trust, PIM/JIT workflow, separated plan/apply roles, break-glass test
+| Identity team
+
+| Network
+| Private DNS resolution, egress allowlist, firewall paths, runner connectivity, denial tests
+| Network security
+
+| State
+| Entra-only private backend, RBAC review, version recovery, lock and incident procedure
+| Infrastructure platform
+
+| Cryptography
+| TLS issuance/renewal, seal design, key ownership, rotation and revocation evidence
+| Security engineering
+
+| Backup and DR
+| Encrypted backup inventory, independent restore, quorum recovery, measured RTO/RPO
+| Service owner
+
+| Observability
+| Signal validation, actionable alerts, delivery test, dashboards, cost and retention review
+| Operations
+
+| Change safety
+| Tested modules, provider/agent upgrade policy, canary, rollback limits, maintenance windows
+| Release manager
+
+| Incident response
+| Compromise, seal, credential leak, data loss, and regional outage exercises
+| Incident commander
+
+| Governance
+| Policy compliance, approved exemptions, owner tags, evidence date and expiration
+| Cloud governance
+|===
+
+Every item needs an owner, evidence link, review date, and expiration. “OpenTofu apply succeeded” is
+evidence only that one desired-state transition completed; it is not evidence of availability,
+confidentiality, recoverability, or operational readiness.
+
+== Operational Hardening
+
+For OpenBao, rehearse rolling upgrades one voter at a time, monitor Raft autopilot and peer health,
+retain rollback-compatible snapshots, and document versions that cannot be downgraded. Prevent
+simultaneous voluntary disruption from maintenance, autoscaling, or zone operations.
+
+For both platforms, alert on authorization failures, recovery or purge changes, public exposure,
+certificate expiry, replication or backup failure, state access anomalies, and policy exemptions.
+Avoid collecting secret values in logs. Review ingestion and alert costs as part of capacity planning.
+
+Scan base images and dependencies, patch within a defined service-level objective, and replace rather
+than mutate nodes where architecture permits. Test security updates in an equivalent canary and retain
+an emergency process for actively exploited vulnerabilities.
+
+== Cleanup
+
+Destroy this empty landing zone only after confirming no other team adopted the definitions or
+assignment:
+
+[source,shell]
+----
+tofu plan -destroy -out=guardrails-destroy.tfplan
+tofu apply guardrails-destroy.tfplan
+----
+
+OpenTofu destroys the resource-group assignment before the initiative and definitions. The provider
+refuses to delete the resource group if unmanaged resources remain. Never delete policy state and then
+leave an unowned subscription-level definition behind.
+
+== Further Reading
+
+* https://learn.microsoft.com/azure/governance/policy/concepts/scope[Azure Policy scope]
+* https://learn.microsoft.com/azure/governance/policy/concepts/assignment-structure[Policy assignment structure]
+* https://learn.microsoft.com/azure/governance/policy/concepts/exemption-structure[Policy exemptions]
+* https://openbao.org/docs/internals/integrated-storage/[OpenBao integrated storage]
+* https://openbao.org/docs/concepts/seal/[OpenBao seal concepts]
+* https://learn.microsoft.com/azure/well-architected/security/checklist[Azure security checklist]
+* https://learn.microsoft.com/azure/well-architected/reliability/checklist[Azure reliability checklist]

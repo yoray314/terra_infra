@@ -36,6 +36,7 @@ environment composition.
 . link:examples/09-modules-environments/README.adoc[Compose reusable modules across environments]
 . link:examples/10-infrastructure-testing/README.adoc[Test infrastructure code without Azure resources]
 . link:examples/11-operations-observability/README.adoc[Operate and observe the secret platforms]
+. link:examples/12-production-hardening/README.adoc[Add guardrails and assess production readiness]
 
 == Documentation
 

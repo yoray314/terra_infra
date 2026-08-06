@@ -176,6 +176,21 @@ jobs:
       - name: Validate observability scripts
         run: bash -n examples/11-operations-observability/scripts/*.sh
 
+      - name: Initialize production-hardening example
+        working-directory: examples/12-production-hardening
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate production-hardening example
+        working-directory: examples/12-production-hardening
+        run: tofu validate -no-color
+
+      - name: Test production-hardening example
+        working-directory: examples/12-production-hardening
+        run: tofu test -no-color
+
+      - name: Validate production-hardening scripts
+        run: bash -n examples/12-production-hardening/scripts/*.sh
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

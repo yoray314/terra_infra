@@ -39,25 +39,26 @@ mock_provider "azurerm" {
 }
 
 variables {
-  resource_group_name           = "rg-openbao-unit"
-  location                      = "eastus"
-  deployment_name               = "openbao-unit"
-  computer_name                 = "openbao-unit"
-  node_id                       = "openbao-unit-1"
-  subnet_name                   = "snet-openbao-unit"
-  os_disk_name                  = "disk-openbao-unit-os"
-  raft_disk_name                = "disk-openbao-unit-raft"
-  virtual_network_address_space = ["10.60.0.0/16"]
-  subnet_address_prefixes       = ["10.60.1.0/24"]
-  private_ip_address            = "10.60.1.10"
-  caller_ipv4_cidr              = "198.51.100.20/32"
-  dns_label                     = "openbao-unit-314159"
-  admin_username                = "azureadmin"
-  ssh_public_key                = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOm+MMeUavzWIFQcyQkxZMxaJeW+XzVBD8K1Qbw3rxjd openbao-test"
-  vm_size                       = "Standard_B2s_v2"
-  image_version                 = "24.04.202608020"
-  openbao_version               = "2.6.1"
-  openbao_gpg_fingerprint       = "66D15FDD87287219C8E15478D200CD702853E6D0"
+  resource_group_name              = "rg-openbao-unit"
+  location                         = "eastus"
+  deployment_name                  = "openbao-unit"
+  computer_name                    = "openbao-unit"
+  node_id                          = "openbao-unit-1"
+  subnet_name                      = "snet-openbao-unit"
+  os_disk_name                     = "disk-openbao-unit-os"
+  raft_disk_name                   = "disk-openbao-unit-raft"
+  virtual_network_address_space    = ["10.60.0.0/16"]
+  subnet_address_prefixes          = ["10.60.1.0/24"]
+  private_ip_address               = "10.60.1.10"
+  caller_ipv4_cidr                 = "198.51.100.20/32"
+  dns_label                        = "openbao-unit-314159"
+  admin_username                   = "azureadmin"
+  ssh_public_key                   = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOm+MMeUavzWIFQcyQkxZMxaJeW+XzVBD8K1Qbw3rxjd openbao-test"
+  system_assigned_identity_enabled = true
+  vm_size                          = "Standard_B2s_v2"
+  image_version                    = "24.04.202608020"
+  openbao_version                  = "2.6.1"
+  openbao_gpg_fingerprint          = "66D15FDD87287219C8E15478D200CD702853E6D0"
   tags = {
     environment = "unit"
   }
@@ -130,9 +131,10 @@ run "secure_openbao_plan" {
     condition = (
       azurerm_linux_virtual_machine.this.disable_password_authentication &&
       azurerm_linux_virtual_machine.this.secure_boot_enabled &&
-      azurerm_linux_virtual_machine.this.vtpm_enabled
+      azurerm_linux_virtual_machine.this.vtpm_enabled &&
+      azurerm_linux_virtual_machine.this.identity[0].type == "SystemAssigned"
     )
-    error_message = "The VM must disable passwords and retain Trusted Launch controls."
+    error_message = "The VM must disable passwords, retain Trusted Launch, and expose a system identity."
   }
 
   assert {

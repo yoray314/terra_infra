@@ -124,6 +124,14 @@ resource "azurerm_linux_virtual_machine" "this" {
     private_ip              = var.private_ip_address
   }))
 
+  dynamic "identity" {
+    for_each = var.system_assigned_identity_enabled ? [true] : []
+
+    content {
+      type = "SystemAssigned"
+    }
+  }
+
   admin_ssh_key {
     username   = var.admin_username
     public_key = var.ssh_public_key

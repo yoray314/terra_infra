@@ -82,10 +82,11 @@ tofu -chdir=examples/04-openbao-vm apply module-refactor.tfplan
 tofu -chdir=examples/04-openbao-vm state list
 ----
 
-The plan should report address moves and no infrastructure changes. Stop instead of applying if it
-proposes replacing the VM, network, or disks. After apply, `state list` should show the resources under
-`module.openbao`. Never remove `moved.tf` until every maintained state that used the old addresses has
-applied the migration.
+The module extraction itself should report address moves without replacing infrastructure. On branches
+that include Example 11, the same plan also adds the monitoring identity to the VM in place. Stop
+instead of applying if it proposes replacing the VM, network, or disks. After apply, `state list`
+should show the moved resources under `module.openbao`. Never remove `moved.tf` until every maintained
+state that used the old addresses has applied the migration.
 
 == Configure an Environment
 

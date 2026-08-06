@@ -161,6 +161,21 @@ jobs:
         working-directory: examples/08-github-oidc/workload
         run: tofu validate -no-color
 
+      - name: Initialize operations and observability example
+        working-directory: examples/11-operations-observability
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate operations and observability example
+        working-directory: examples/11-operations-observability
+        run: tofu validate -no-color
+
+      - name: Test operations and observability example
+        working-directory: examples/11-operations-observability
+        run: tofu test -no-color
+
+      - name: Validate observability scripts
+        run: bash -n examples/11-operations-observability/scripts/*.sh
+
       - name: Validate pull-request commits
         if: github.event_name == 'pull_request'
         env:

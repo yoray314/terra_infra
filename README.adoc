@@ -35,6 +35,7 @@ environment composition.
 . link:examples/08-github-oidc/README.adoc[Deploy with GitHub Actions OIDC]
 . link:examples/09-modules-environments/README.adoc[Compose reusable modules across environments]
 . link:examples/10-infrastructure-testing/README.adoc[Test infrastructure code without Azure resources]
+. link:examples/11-operations-observability/README.adoc[Operate and observe the secret platforms]
 
 == Documentation
 

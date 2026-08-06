@@ -13,6 +13,9 @@ original addresses while preserving their associations with the same Azure resou
 migration instructions in link:../09-modules-environments/README.adoc[Example 09] before applying an
 existing state.
 
+Example 11 enables a system-assigned VM identity for Azure Monitor Agent. The identity has no Azure
+roles by itself and does not replace the VM.
+
 == Learning Objectives
 
 * Provision a self-hosted secret service without placing bootstrap secrets in state.

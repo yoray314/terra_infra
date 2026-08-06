@@ -154,6 +154,12 @@ variable "ssh_public_key" {
   }
 }
 
+variable "system_assigned_identity_enabled" {
+  description = "Whether the VM receives the system identity required by Azure Monitor Agent."
+  type        = bool
+  default     = false
+}
+
 variable "vm_size" {
   description = "Azure VM size for the disposable single-node lab."
   type        = string

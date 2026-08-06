@@ -1,0 +1,19 @@
+resource_group_name = "rg-opentofu-monitoring"
+workspace_name      = "law-opentofu-openbao-replace-1234"
+key_vault_name      = "kv-replace-1234"
+alert_email_address = "operator@example.com"
+alerts_enabled      = false
+
+openbao_resource_group_name     = "rg-opentofu-openbao"
+openbao_virtual_machine_name    = "vm-openbao-lab"
+key_vault_resource_group_name   = "rg-opentofu-key-vault"
+azure_monitor_agent_version     = "1.43"
+daily_quota_gb                  = 0.5
+cpu_alert_threshold             = 85
+
+tags = {
+  environment  = "learning"
+  example      = "11-operations-observability"
+  "managed-by" = "opentofu"
+  state        = "azure-blob"
+}

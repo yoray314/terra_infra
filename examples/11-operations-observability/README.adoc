@@ -1,0 +1,301 @@
+= Example 11: Operations and Observability
+
+This example adds an operating layer around the OpenBao VM and Key Vault. A separate OpenTofu state
+owns a Log Analytics workspace, Azure Monitor Agent extension, data collection rule, Key Vault
+diagnostic setting, action group, and telemetry-gated saved queries and alerts. It does not take
+ownership of the VM, vault, or their workload configuration.
+
+Log ingestion, retained data, scheduled-query alerts, metric alerts, and notifications can incur
+charges. The first phase creates no alert-rule resources, limits collection, retains data for 30 days,
+and sets a 0.5 GB daily ingestion cap. A cap bounds cost but can also create a monitoring blind spot.
+
+== Learning Objectives
+
+* Treat observability resources as independently owned infrastructure.
+* Authenticate Azure Monitor Agent with a managed identity instead of a workspace key.
+* Route host signals and Key Vault audit metadata into their supported Log Analytics tables.
+* Bound collection frequency, severity, retention, and daily ingestion.
+* Verify telemetry before enabling alert actions.
+* Connect every alert to an operator response rather than collecting unactionable noise.
+
+== Architecture
+
+[source,text]
+----
+OpenBao VM -- system identity --> Azure Monitor Agent
+     |                               |
+     |                               +--> DCR --> Perf, Syslog, Heartbeat
+     |                                             |
+     +--> platform CPU metric                      v
+                                             Log Analytics
+Key Vault --> audit diagnostic setting -----------+
+                                                   |
+                                                   +--> saved KQL queries
+                                                   +--> heartbeat and syslog alerts
+
+CPU metric + log alerts --> action group --> operator email
+----
+
+The workspace permits public ingestion and Entra-authenticated queries because the current VM and
+operator do not use Azure Monitor Private Link. Shared-key authentication is disabled. Example 12
+discusses the additional network and identity controls required for a production boundary.
+
+== Signal Contract
+
+[cols="2,3,3",options="header"]
+|===
+| Signal
+| Collection
+| Intended response
+
+| Heartbeat
+| Azure Monitor Agent, evaluated every five minutes over a ten-minute window
+| Check VM power, extension health, DCR association, DNS, and outbound connectivity
+
+| OpenBao warning markers
+| Daemon syslog from the `bao` process containing `[WARN]` or `[ERROR]`
+| Query the event window, inspect service status, and preserve evidence before remediation
+
+| VM CPU
+| Azure platform metric averaged over 15 minutes
+| Identify the process and workload before resizing or restarting
+
+| Host capacity
+| CPU, available memory, and logical-disk free space every 60 seconds
+| Trend saturation and investigate Raft-disk or OS-disk pressure
+
+| Key Vault audit
+| Audit category group in `AzureDiagnostics`
+| Investigate failed operations, caller identity, network path, and authorization
+|===
+
+OpenBao writes through systemd as process `bao` at daemon/info priority even when its message contains
+a warning marker. The DCR therefore collects info-or-higher for the daemon facility, while host auth
+and syslog facilities remain warning-or-higher. Increase collection only for a bounded diagnostic
+window and estimate ingestion impact first. Key Vault summaries exclude the expected HTTP 401
+`Authentication` challenge so it is not reported as an operational failure.
+
+== Prerequisites
+
+Keep Examples 02, 03, and 04 deployed. Complete the Example 09 state migration if the OpenBao state
+still uses pre-module addresses. The monitoring caller needs permission to create monitoring resources
+and to add an extension to the existing VM and a diagnostic setting to the existing vault.
+
+Confirm the active account and required providers:
+
+[source,shell]
+----
+az account show --output table
+az provider show --namespace Microsoft.Insights --query registrationState --output tsv
+az provider show --namespace Microsoft.OperationalInsights --query registrationState --output tsv
+----
+
+Register a missing provider with `az provider register --namespace <namespace> --wait`. Install the
+Azure CLI Log Analytics query extension used by the verification script:
+
+[source,shell]
+----
+az extension add --name log-analytics
+----
+
+Version `1.43.0` was the latest supported Linux AMA image available in `eastus` when this lesson was
+written. Confirm the configured baseline is available in the VM's region:
+
+[source,shell]
+----
+az vm extension image show \
+  --location eastus \
+  --publisher Microsoft.Azure.Monitor \
+  --name AzureMonitorLinuxAgent \
+  --version 1.43.0 \
+  --output table
+----
+
+The extension uses `1.43` as its minimum deployment baseline and opts into Microsoft's automatic safe
+deployment updates. The installed patch or minor version can therefore advance after apply. Keep the
+baseline within Microsoft's one-year support window.
+
+== Add the VM Identity First
+
+Example 11 adds a system-assigned identity to `modules/openbao-lab`. Apply that change through the
+state that owns the VM before applying this monitoring root:
+
+[source,shell]
+----
+tofu -chdir=examples/04-openbao-vm init \
+  -backend-config=backend.azurerm.tfbackend
+tofu -chdir=examples/04-openbao-vm plan -out=monitoring-identity.tfplan
+tofu -chdir=examples/04-openbao-vm apply monitoring-identity.tfplan
+----
+
+The plan should add a system identity in place, not replace the VM. The monitoring root has a
+precondition that rejects a VM without this identity. AMA uses the identity through Instance Metadata
+Service; no workspace key is passed to the extension.
+
+== Configure State and Inputs
+
+From `examples/11-operations-observability`, create ignored local files:
+
+[source,shell]
+----
+cp backend.azurerm.tfbackend.example backend.azurerm.tfbackend
+cp terraform.tfvars.example terraform.tfvars
+----
+
+Set the actual backend account, globally distinctive workspace name, existing vault name, and operator
+email. Keep `alerts_enabled = false` for the first apply so no saved-query or alert-rule resources are
+submitted before the tables exist. The email address is operational metadata, not an authentication
+secret, but it is still personal data recorded in state.
+
+Initialize and review a saved plan:
+
+[source,shell]
+----
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+
+tofu init -backend-config=backend.azurerm.tfbackend
+tofu fmt -check
+tofu validate
+tofu plan -out=observability.tfplan
+tofu apply observability.tfplan
+----
+
+Review cross-state targets carefully. The plan may create an extension below the existing VM and a
+diagnostic setting below the existing vault, but must not modify or import either parent resource.
+
+The AzureRM provider records computed workspace shared keys in state even though local workspace-key
+authentication is disabled. Treat this state as sensitive: keep it in the hardened Example 02 backend,
+grant only data-plane RBAC needed by operators and CI, and never upload it as an artifact.
+
+== Verify Collection
+
+Generate a Key Vault data-plane audit event without printing a secret value:
+
+[source,shell]
+----
+az keyvault secret list \
+  --vault-name "$(tofu output -raw key_vault_name)" \
+  --maxresults 1 \
+  --query '[].id' \
+  --output none
+----
+
+Generate a recognizable daemon/syslog event through Azure Run Command. Do this before alert resources
+exist; the real OpenBao alert excludes this test process name:
+
+[source,shell]
+----
+az vm run-command invoke \
+  --resource-group "$(tofu output -raw openbao_resource_group_name)" \
+  --name "$(tofu output -raw openbao_virtual_machine_name)" \
+  --command-id RunShellScript \
+  --scripts "logger -p daemon.info -t openbao-observability-test 'OpenBao telemetry verification'" \
+  --output none
+----
+
+Allow several minutes for the first heartbeat and logs, then run the read-only verifier:
+
+[source,shell]
+----
+export MONITORING_RESOURCE_GROUP="$(tofu output -raw resource_group_name)"
+export LOG_ANALYTICS_WORKSPACE_NAME="$(tofu output -raw workspace_name)"
+export OPENBAO_RESOURCE_GROUP="$(tofu output -raw openbao_resource_group_name)"
+export OPENBAO_VM_NAME="$(tofu output -raw openbao_virtual_machine_name)"
+export KEY_VAULT_RESOURCE_GROUP="$(tofu output -raw key_vault_resource_group_name)"
+export KEY_VAULT_NAME="$(tofu output -raw key_vault_name)"
+
+./scripts/verify-telemetry.sh
+----
+
+The script fails unless the AMA extension succeeded, at least one DCR is associated, and the previous
+30 minutes contain a heartbeat, the synthetic syslog marker, all three guest counters, and a Key Vault
+audit event. It prints only aggregate counts, not message bodies, request payloads, tokens, or secret
+values.
+
+== Enable and Test Alerts
+
+After telemetry is healthy, set `alerts_enabled = true`. The next plan creates the saved queries and
+three alert-rule resources now that query validation can find the tables. Review and apply it, then
+verify all rules report enabled:
+
+[source,shell]
+----
+tofu plan -out=enable-alerts.tfplan
+tofu apply enable-alerts.tfplan
+
+az resource list \
+  --resource-group "$(tofu output -raw resource_group_name)" \
+  --resource-type Microsoft.Insights/metricAlerts \
+  --query '[].{name:name,enabled:properties.enabled}' \
+  --output table
+
+az resource list \
+  --resource-group "$(tofu output -raw resource_group_name)" \
+  --resource-type Microsoft.Insights/scheduledQueryRules \
+  --query '[].{name:name,enabled:properties.enabled}' \
+  --output table
+----
+
+Use Azure Monitor's action-group test feature to validate notification delivery. A notification test
+does not prove an alert query is correct; the verifier and alert-history review cover the signal path.
+Do not stop the VM or agent merely to manufacture an outage because a restart requires OpenBao unseal.
+
+== Operator Runbooks
+
+=== Missing Heartbeat
+
+. Confirm the VM power state and recent platform activity.
+. Check the AMA extension provisioning state and DCR association.
+. Query the last heartbeat and compare with other VM metrics.
+. Inspect AMA service logs through the approved SSH path without exposing OpenBao tokens.
+. Restore collection or VM service, then confirm the alert auto-resolves.
+
+=== OpenBao Warning Marker
+
+. Preserve the alert timestamp, resource ID, process, and severity.
+. Query only the bounded event window; avoid exporting unrestricted logs.
+. Check `openbao.service`, disk capacity, TLS validity, and recent authorized changes.
+. Escalate before restarting or unsealing when integrity or compromise is uncertain.
+
+=== High CPU
+
+. Correlate platform CPU with memory, disk, request volume, and recent operations.
+. Identify the responsible process before changing capacity.
+. Prefer removing abnormal load or a faulty change over an unexplained restart.
+. Record the cause and adjust the threshold only with evidence of normal sustained behavior.
+
+== Data and Cost Boundaries
+
+Azure Monitor logs may contain identities, resource names, IP addresses, secret paths, and operation
+metadata. They must not contain token values, unseal shares, private keys, SecretIDs, or secret values.
+Do not enable OpenBao trace/debug logging into the shared workspace without a reviewed redaction and
+retention plan.
+
+The daily cap is an emergency cost boundary, not capacity planning. When reached, most ingestion stops
+until reset while the system continues running. Alert-rule evaluations and retained data can have
+separate charges. Review Azure Monitor pricing and workspace usage before raising the cap.
+
+== Cleanup
+
+Destroy this root before destroying the VM or Key Vault so OpenTofu can remove child extensions,
+associations, and diagnostics cleanly:
+
+[source,shell]
+----
+tofu plan -destroy -out=observability-destroy.tfplan
+tofu apply observability-destroy.tfplan
+----
+
+Confirm the action group, alert rules, DCR, extension, diagnostic setting, and monitoring resource
+group are gone. Azure soft-deletes a Log Analytics workspace for a recovery period; ingestion and alert
+evaluation stop, but verify deletion and current billing behavior in the target tenant. Destroy the
+shared state backend last.
+
+== Further Reading
+
+* https://learn.microsoft.com/azure/azure-monitor/agents/azure-monitor-agent-overview[Azure Monitor Agent overview]
+* https://learn.microsoft.com/azure/azure-monitor/data-collection/data-collection-rule-overview[Data collection rules]
+* https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-overview[Azure Monitor alerts]
+* https://learn.microsoft.com/azure/key-vault/general/howto-logging[Key Vault logging]
+* https://learn.microsoft.com/azure/azure-monitor/logs/cost-logs[Log Analytics cost controls]

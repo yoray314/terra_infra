@@ -87,12 +87,28 @@ jobs:
         run: tofu validate -no-color
 
       - name: Validate OpenBao cloud-init template
-        working-directory: examples/04-openbao-vm
+        working-directory: modules/openbao-lab
         run: |
           ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' cloud-init.yaml.tftpl
           awk '/^      #!\/usr\/bin\/env bash$/{flag=1} flag{sub(/^      /,""); if (/^  - path: \/etc\/systemd\/system\/openbao-bootstrap.service$/) exit; print}' \
             cloud-init.yaml.tftpl > "${RUNNER_TEMP}/openbao-bootstrap"
           bash -n "${RUNNER_TEMP}/openbao-bootstrap"
+
+      - name: Initialize development environment
+        working-directory: environments/dev
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate development environment
+        working-directory: environments/dev
+        run: tofu validate -no-color
+
+      - name: Initialize test environment
+        working-directory: environments/test
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate test environment
+        working-directory: environments/test
+        run: tofu validate -no-color
 
       - name: Validate comparison scripts
         run: bash -n examples/05-secrets-comparison/scripts/*.sh examples/05-secrets-comparison/scripts/*.bash

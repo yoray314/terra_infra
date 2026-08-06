@@ -8,6 +8,11 @@ This is intentionally not a production architecture. It has one node, no Raft qu
 tolerance, no automatic unseal, no durable certificate-renewal path, and a public endpoint
 restricted to one operator IP. The VM and managed disks incur charges while deployed.
 
+Example 09 extracts this stack into `modules/openbao-lab`. The `moved.tf` declarations replace the
+original addresses while preserving their associations with the same Azure resources. Review the
+migration instructions in link:../09-modules-environments/README.adoc[Example 09] before applying an
+existing state.
+
 == Learning Objectives
 
 * Provision a self-hosted secret service without placing bootstrap secrets in state.

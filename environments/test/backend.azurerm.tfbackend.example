@@ -1,0 +1,4 @@
+resource_group_name  = "rg-opentofu-state"
+storage_account_name = "replacewithyourstateaccount"
+container_name       = "tfstate"
+key                  = "environments/openbao-test.tfstate"

@@ -41,7 +41,7 @@ minimum versions when an exact version does not affect infrastructure semantics.
 
 Azure CLI is an authentication and account-selection helper for local examples. It is not pinned
 to an exact patch release because availability differs across operating-system package repositories.
-CI authentication will eventually use OpenID Connect rather than Azure CLI user credentials.
+The deployment workflow in Example 08 uses OpenID Connect rather than Azure CLI user credentials.
 
 == Install OpenTofu
 

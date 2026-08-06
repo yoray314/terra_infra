@@ -1,0 +1,10 @@
+resource_group_name = "rg-opentofu-openbao-dev"
+location            = "eastus"
+caller_ipv4_cidr    = "203.0.113.10/32"
+dns_label           = "openbao-dev-replace-1234"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+
+tags = {
+  owner       = "replace-with-your-name"
+  cost-center = "learning"
+}

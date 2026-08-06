@@ -14,7 +14,8 @@ same engineering practices expected in a shared infrastructure repository.
 == Current Status
 
 Repository standards and the development toolchain are established. The examples progress from a
-local-state resource group through remote state and managed secret storage.
+local-state resource group through remote state, secret infrastructure, identity, CI/CD, and reusable
+environment composition.
 
 == Getting Started
 
@@ -32,6 +33,7 @@ local-state resource group through remote state and managed secret storage.
 . link:examples/06-workload-identity/README.adoc[Consume secrets with managed identity]
 . link:examples/07-private-networking/README.adoc[Move secret traffic onto private networking]
 . link:examples/08-github-oidc/README.adoc[Deploy with GitHub Actions OIDC]
+. link:examples/09-modules-environments/README.adoc[Compose reusable modules across environments]
 
 == Documentation
 

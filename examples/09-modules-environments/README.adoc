@@ -1,0 +1,171 @@
+= Example 09: Modules and Environments
+
+This example extracts the OpenBao infrastructure first built in Example 04 into a reusable local
+module, then composes that module from independent development and test roots. The two environments
+share implementation, but not resource names, address spaces, input files, or state.
+
+The module remains a disposable single-node learning architecture. Reuse removes configuration
+duplication; it does not add high availability, automatic unseal, private administration, backup,
+or certificate renewal.
+
+== Learning Objectives
+
+* Define a module around a cohesive group of resources.
+* Keep provider and backend configuration in root modules.
+* Give each long-lived environment a separate root and state key.
+* Refactor existing resources into a module without changing their state identity.
+* Review module contracts instead of reaching into child-module resources.
+* Understand why module reuse and environment isolation solve different problems.
+
+== Repository Layout
+
+[source,text]
+----
+modules/
+  openbao-lab/             reusable network, VM, disk, and bootstrap implementation
+environments/
+  dev/                     development composition and state key
+  test/                    test composition and state key
+examples/
+  09-modules-environments/ lesson and operating instructions
+----
+
+`modules/openbao-lab` receives an existing resource group and creates one complete OpenBao node. It
+does not configure a provider or backend, create the resource group, or read an SSH key from disk.
+Those decisions belong to each root. Passing the public-key content into the module keeps its
+filesystem assumptions out of the reusable contract.
+
+The environment roots deliberately contain some similar code. A root is an ownership and state
+boundary, not a module to deduplicate. The shared infrastructure implementation is the part that
+belongs in `modules/openbao-lab`.
+
+== State Isolation
+
+Development and test can use the same hardened storage account and container from Example 02 while
+retaining separate blobs:
+
+[cols="2,3",options="header"]
+|===
+| Root
+| Backend key
+
+| `environments/dev`
+| `environments/openbao-dev.tfstate`
+
+| `environments/test`
+| `environments/openbao-test.tfstate`
+|===
+
+A lock, plan, apply, or destroy in one root cannot implicitly operate on the other environment.
+Directory roots also make environment differences visible in review. OpenTofu workspaces would put
+those differences behind a CLI selection and are not used here.
+
+State keys are not access-control boundaries. Use separate storage accounts, containers, identities,
+or subscriptions when environments require distinct trust boundaries.
+
+== Safely Refactor Example 04
+
+Example 04 now calls the module. Its `moved.tf` maps every resource moved into the module to the
+corresponding child-module address. The resource group remains in the root. These declarations update
+state addresses; they do not move Azure resources. Resource names and rendered cloud-init remain
+unchanged for the original inputs.
+
+If Example 04 still exists in remote state, initialize it and inspect a speculative plan before
+applying the refactor:
+
+[source,shell]
+----
+tofu -chdir=examples/04-openbao-vm init \
+  -backend-config=backend.azurerm.tfbackend
+tofu -chdir=examples/04-openbao-vm plan -out=module-refactor.tfplan
+tofu -chdir=examples/04-openbao-vm apply module-refactor.tfplan
+tofu -chdir=examples/04-openbao-vm state list
+----
+
+The plan should report address moves and no infrastructure changes. Stop instead of applying if it
+proposes replacing the VM, network, or disks. After apply, `state list` should show the resources under
+`module.openbao`. Never remove `moved.tf` until every maintained state that used the old addresses has
+applied the migration.
+
+== Configure an Environment
+
+Complete Example 02 and keep its backend available. Ensure the Compute and Network providers are
+registered and that the selected subscription has quota for `Standard_B2s_v2`.
+
+Choose one environment. Running both creates two VMs and four managed disks. For development:
+
+[source,shell]
+----
+cp environments/dev/backend.azurerm.tfbackend.example \
+  environments/dev/backend.azurerm.tfbackend
+cp environments/dev/terraform.tfvars.example \
+  environments/dev/terraform.tfvars
+----
+
+Edit the ignored files. Set the actual backend account, replace the documentation-only
+`203.0.113.10/32` address with the operator's public `/32`, and choose a regionally unique DNS label.
+The SSH path must identify a public key, never a private key.
+
+The test root uses the same process with `environments/test`. Do not point the roots at the same state
+key, resource group, DNS label, or address space.
+
+== Initialize and Plan
+
+Export the selected subscription and tenant explicitly, then run the root in its own directory:
+
+[source,shell]
+----
+export ARM_SUBSCRIPTION_ID="$(az account show --query id --output tsv)"
+export ARM_TENANT_ID="$(az account show --query tenantId --output tsv)"
+
+tofu -chdir=environments/dev init \
+  -backend-config=backend.azurerm.tfbackend
+tofu -chdir=environments/dev fmt -check
+tofu -chdir=environments/dev validate
+tofu -chdir=environments/dev plan -out=openbao-dev.tfplan
+----
+
+Review the resource group, CIDRs, public DNS label, VM size, pinned image, and tags. A local module is
+versioned by the same repository commit as its callers, so review module and environment changes
+together.
+
+Apply only when the plan targets the expected subscription and environment:
+
+[source,shell]
+----
+tofu -chdir=environments/dev apply openbao-dev.tfplan
+----
+
+Initialization and unseal remain the manual procedure documented in Example 04. OpenTofu state
+contains rendered bootstrap configuration and the public SSH key, but must never contain unseal keys,
+root tokens, private keys, AppRole SecretIDs, or runtime secrets.
+
+== Change the Module
+
+Treat a shared-module edit as a change to every caller. Validate all roots, inspect a plan for each
+deployed environment, and apply environments independently. Adding an output is usually compatible;
+renaming an input or resource address requires an explicit migration.
+
+The module exports stable operational values such as the OpenBao URL and network resource IDs. Callers
+should use those outputs rather than reference internal addresses such as
+`module.openbao.azurerm_linux_virtual_machine.this`.
+
+== Cleanup
+
+Destroy the selected environment before deleting its state or backend:
+
+[source,shell]
+----
+tofu -chdir=environments/dev plan -destroy -out=openbao-dev-destroy.tfplan
+tofu -chdir=environments/dev apply openbao-dev-destroy.tfplan
+----
+
+Confirm the resource group is gone. Delete local plan files and ignored input files when the exercise
+is complete. Keep the shared backend until every state blob that depends on it has been destroyed.
+
+== Further Reading
+
+* https://opentofu.org/docs/language/modules/develop/[OpenTofu module development]
+* https://opentofu.org/docs/language/modules/syntax/[Calling modules]
+* https://opentofu.org/docs/language/modules/develop/refactoring/[Refactoring modules]
+* https://opentofu.org/docs/language/modules/develop/composition/[Module composition]

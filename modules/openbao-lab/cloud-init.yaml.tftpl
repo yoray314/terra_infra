@@ -150,13 +150,13 @@ write_files:
         -out "$TLS_TMP/server.key"
       openssl req -new -sha256 \
         -key "$TLS_TMP/server.key" \
-        -subj '/CN=openbao-lab' \
+        -subj '/CN=${host_name}' \
         -out "$TLS_TMP/server.csr"
       cat > "$TLS_TMP/server.ext" <<EOF
       basicConstraints=critical,CA:FALSE
       keyUsage=critical,digitalSignature,keyEncipherment
       extendedKeyUsage=serverAuth
-      subjectAltName=DNS:$FQDN,DNS:openbao-lab,IP:$PRIVATE_IP,IP:127.0.0.1
+      subjectAltName=DNS:$FQDN,DNS:${host_name},IP:$PRIVATE_IP,IP:127.0.0.1
       EOF
       openssl x509 -req -sha256 -days 90 \
         -in "$TLS_TMP/server.csr" \
@@ -184,7 +184,7 @@ write_files:
 
       storage "raft" {
         path    = "$DATA_MOUNT"
-        node_id = "openbao-1"
+        node_id = "${node_id}"
       }
 
       listener "tcp" {

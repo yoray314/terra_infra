@@ -146,6 +146,8 @@ Treat a shared-module edit as a change to every caller. Validate all roots, insp
 deployed environment, and apply environments independently. Adding an output is usually compatible;
 renaming an input or resource address requires an explicit migration.
 
+Example 10 adds Azure-offline contract tests for the module and its cross-input network preconditions.
+
 The module exports stable operational values such as the OpenBao URL and network resource IDs. Callers
 should use those outputs rather than reference internal addresses such as
 `module.openbao.azurerm_linux_virtual_machine.this`.

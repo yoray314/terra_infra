@@ -38,7 +38,7 @@ repos:
         name: OpenTofu format
         entry: tofu fmt -check -diff
         language: system
-        files: \.(tf|tfvars)$
+        files: \.(tf|tfvars|tftest\.hcl|tofutest\.hcl)$
 
       - id: commitizen
         name: commitizen check

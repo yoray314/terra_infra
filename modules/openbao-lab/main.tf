@@ -11,6 +11,19 @@ resource "azurerm_subnet" "this" {
   resource_group_name  = var.resource_group_name
   virtual_network_name = azurerm_virtual_network.this.name
   address_prefixes     = var.subnet_address_prefixes
+
+  lifecycle {
+    precondition {
+      condition = alltrue([
+        for subnet_prefix in var.subnet_address_prefixes : anytrue([
+          for network_prefix in var.virtual_network_address_space :
+          cidrcontains(network_prefix, cidrhost(subnet_prefix, 0)) &&
+          cidrcontains(network_prefix, cidrhost(subnet_prefix, -1))
+        ])
+      ])
+      error_message = "Every subnet prefix must be contained in the virtual network address space."
+    }
+  }
 }
 
 resource "azurerm_public_ip" "this" {
@@ -70,6 +83,16 @@ resource "azurerm_network_interface" "this" {
     private_ip_address_allocation = "Static"
     private_ip_address            = var.private_ip_address
     public_ip_address_id          = azurerm_public_ip.this.id
+  }
+
+  lifecycle {
+    precondition {
+      condition = anytrue([
+        for subnet_prefix in var.subnet_address_prefixes :
+        cidrcontains(subnet_prefix, var.private_ip_address)
+      ])
+      error_message = "The private IP address must be contained in an OpenBao subnet prefix."
+    }
   }
 }
 

@@ -94,6 +94,14 @@ jobs:
             cloud-init.yaml.tftpl > "${RUNNER_TEMP}/openbao-bootstrap"
           bash -n "${RUNNER_TEMP}/openbao-bootstrap"
 
+      - name: Initialize OpenBao module tests
+        working-directory: modules/openbao-lab
+        run: tofu init -backend=false -input=false -lockfile=readonly
+
+      - name: Test OpenBao module
+        working-directory: modules/openbao-lab
+        run: tofu test -no-color
+
       - name: Initialize development environment
         working-directory: environments/dev
         run: tofu init -backend=false -input=false -lockfile=readonly

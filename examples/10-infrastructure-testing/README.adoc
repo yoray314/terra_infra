@@ -1,0 +1,145 @@
+= Example 10: Test Infrastructure Code
+
+This example adds executable contract tests for `modules/openbao-lab`. OpenTofu evaluates real module
+configuration against the AzureRM provider schema, but a mock provider replaces every Azure API call.
+Every run uses plan mode, so the suite creates no resource group, VM, disk, state backend, or Azure
+cost. Provider initialization may still contact the OpenTofu registry unless a cache or mirror is
+configured; test execution is Azure-offline, not universally network-offline.
+
+Tests complement review and validation; they do not prove that Azure will accept a deployment or that
+OpenBao will operate correctly after boot.
+
+== Learning Objectives
+
+* Use native `tofu test` files as versioned module contracts.
+* Replace cloud calls with a mock provider for deterministic Azure-offline tests.
+* Assert security-relevant resource arguments and rendered configuration.
+* Exercise expected validation and precondition failures.
+* Separate fast pull-request tests from live integration tests.
+* Understand what a mocked plan cannot verify.
+
+== Testing Layers
+
+[cols="2,3,3",options="header"]
+|===
+| Layer
+| What it catches
+| What it does not catch
+
+| Format and repository hooks
+| Invalid formatting, malformed YAML, unsafe file additions, and workflow lint
+| OpenTofu semantics or Azure behavior
+
+| `tofu validate`
+| Invalid references, types, provider schemas, and module composition
+| Values that are known only during planning or apply
+
+| Mocked `tofu test`
+| Input contracts, preconditions, resource arguments, outputs, and rendered cloud-init
+| Azure RBAC, quotas, regional availability, API behavior, and guest execution
+
+| Speculative Azure plan
+| Current state, provider reads, permissions, drift, and proposed lifecycle actions
+| Successful apply or workload health
+
+| Disposable integration test
+| Resource creation, cloud-init, connectivity, and cleanup behavior
+| Production scale, resilience, or every failure mode
+|===
+
+The repository runs the first three layers on pull requests. Example 08 provides an explicitly
+dispatched Azure plan. Live integration remains a deliberate, isolated operation because this module
+creates billable infrastructure.
+
+== Read the Test Suite
+
+The suite is in `modules/openbao-lab/tests/openbao_lab.tftest.hcl`. Its top-level `variables` block
+defines a complete, valid module call. The public SSH key is test fixture data and has no corresponding
+private key in the repository.
+
+The mocked AzureRM provider supplies syntactically valid Azure resource IDs for computed attributes.
+This matters because provider schema validation still parses IDs passed between mocked resources. No
+Azure credentials are read and no provider operation reaches Azure.
+
+`secure_openbao_plan` checks contracts that should remain visible during review:
+
+* operator access is restricted to one `/32` and ports 22 and 8200;
+* a terminal deny-all inbound rule remains present;
+* password login stays disabled and Trusted Launch stays enabled;
+* OS and Raft storage settings remain deliberate;
+* cloud-init receives the pinned OpenBao version and stable Raft node ID; and
+* the module URL is assembled from the expected FQDN.
+
+The negative runs use `expect_failures` to prove that the module rejects a private operator CIDR,
+shell metacharacters in a node ID, malformed SSH key data, mixed valid and invalid subnets, a subnet
+that extends outside the virtual network, and a private IP outside the subnet. A negative test is
+valuable only when it fails for the intended custom condition.
+
+== Run Offline Tests
+
+From the repository root:
+
+[source,shell]
+----
+tofu -chdir=modules/openbao-lab init -backend=false -lockfile=readonly
+tofu -chdir=modules/openbao-lab test -no-color
+----
+
+The expected summary is:
+
+[source,text]
+----
+Success! 7 passed, 0 failed.
+----
+
+Downstream callers select providers with their own lock files. This module also commits a lock file
+because `tofu test` temporarily treats the module directory as a root; CI enforces it with
+`-lockfile=readonly`. Remove only the generated `.terraform` directory after local testing.
+
+`tofu test` uses apply mode and real providers by default. The mock, plan mode, and disabled refresh
+make this reviewed suite Azure-offline, but those settings do not make untrusted configuration safe.
+Untrusted code can select a malicious provider or execute an unmocked data source. Run it only in an
+isolated disposable environment with no credentials, secrets, sensitive files, or trusted network
+access.
+
+== Test a Change
+
+Temporarily change the module's operator NSG ports or disable secure boot, then run the suite and read
+the failing assertion. Restore the module and confirm all seven runs pass. Next, add a deliberately bad
+CIDR to one negative run without listing the corresponding condition in `expect_failures`; the run
+must fail rather than silently treating every diagnostic as success.
+
+Keep assertions focused on intentional contracts. Tests that duplicate every argument make harmless
+refactors expensive and obscure the controls that matter.
+
+== Network Preconditions
+
+Example 10 adds two runtime preconditions to the module:
+
+* every subnet range must fit entirely inside one declared virtual-network range; and
+* the static VM address must belong to one declared subnet range.
+
+These relationships involve multiple inputs and cannot be established by checking CIDR syntax alone.
+With the literal environment inputs in this repository, the preconditions fail during planning. If a
+caller derives CIDRs from values unknown during planning, OpenTofu defers the check until apply but
+still evaluates it before operating on the associated subnet or NIC.
+
+== Design a Live Integration Test
+
+A safe future integration job should use a dedicated subscription or tightly delegated resource
+group, short-lived OIDC identity, globally unique names, expiry tags, serialized execution, and an
+unconditional cleanup job. It should verify cloud-init completion, the expected TLS trust path, and
+the health endpoint before destruction.
+
+Never point an integration test at production state, reuse human credentials, upload state or saved
+plans as artifacts, or rely solely on an in-job destroy command. Runner cancellation and platform
+failure require an independent cleanup process and periodic expiry-tag sweeps.
+
+Mock tests cannot validate the Example 04 state refactor. A plan against an actual pre-refactor state
+remains the authoritative proof that moved blocks avoid replacement.
+
+== Further Reading
+
+* https://opentofu.org/docs/v1.12/cli/commands/test/[OpenTofu test command]
+* https://opentofu.org/docs/v1.12/language/expressions/custom-conditions/[Custom conditions]
+* https://learn.microsoft.com/azure/developer/terraform/best-practices-testing-overview[Testing Terraform-compatible Azure infrastructure]
